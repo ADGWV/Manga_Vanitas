@@ -9,17 +9,20 @@
   (function(){
     var t=localStorage.getItem('theme');
     if(t) document.documentElement.setAttribute('data-theme',t);
+    // Auth ready promise - must be created before module script
+    window._authReady = new Promise(function(r){ window._authResolve = r; });
   })();
 </script>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
-         signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, updateProfile,
-         updatePassword, deleteUser, reauthenticateWithCredential, EmailAuthProvider }
+         signOut, onAuthStateChanged, GoogleAuthProvider,
+         GithubAuthProvider, signInWithPopup,
+         updateProfile, updatePassword, deleteUser, reauthenticateWithCredential, EmailAuthProvider }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, collection, getDocs, doc, getDoc, setDoc, deleteDoc,
-         addDoc, updateDoc, query, orderBy, serverTimestamp }
+         addDoc, updateDoc, query, orderBy, serverTimestamp, where, limit, onSnapshot, increment, arrayUnion, arrayRemove }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const ADMIN = 'remysan102030@gmail.com';
@@ -36,32 +39,52 @@ const auth = getAuth(app);
 const db   = getFirestore(app);
 const gp   = new GoogleAuthProvider();
 gp.setCustomParameters({ prompt: 'select_account' });
+const ghp  = new GithubAuthProvider();
 
 window.$auth = auth; window.$db = db; window.$gp = gp;
 window.ADMIN = ADMIN;
+window._ownerUid = null;
 window.CLOUD = { name: 'djv9uolbx', preset: 'fnnukmsu' };
 window.$fb = {
   createUserWithEmailAndPassword, signInWithEmailAndPassword,
-  signOut, signInWithPopup, updateProfile, updatePassword, deleteUser,
+  signOut, signInWithPopup,
+  updateProfile, updatePassword, deleteUser,
   reauthenticateWithCredential, EmailAuthProvider,
+  GithubAuthProvider, ghp,
   collection, getDocs, doc, getDoc, setDoc, deleteDoc,
-  addDoc, updateDoc, query, orderBy, serverTimestamp
+  addDoc, updateDoc, query, orderBy, serverTimestamp, where, limit, onSnapshot, increment, arrayUnion, arrayRemove
 };
 
 onAuthStateChanged(auth, async user => {
   window.ME = user;
+  if(user && user.email === ADMIN) window._ownerUid = user.uid;
   if (user) {
-    const isAdm = user.email === ADMIN;
+    const isOwner = user.email === ADMIN;
     try {
       const snap = await getDoc(doc(db,'users',user.uid));
-      window.IS_ADMIN = isAdm || snap.data()?.role === 'admin';
-      if (isAdm && snap.data()?.role !== 'admin')
+      const udata = snap.data()||{};
+      const firestoreRole = udata.role;
+      // Owner always gets admin, others keep their Firestore role
+      window.IS_ADMIN = isOwner || firestoreRole === 'admin';
+      // Ensure owner always has role:admin in Firestore
+      if (isOwner && firestoreRole !== 'admin')
         await setDoc(doc(db,'users',user.uid),{role:'admin'},{merge:true});
-    } catch(e) { window.IS_ADMIN = isAdm; }
+      // Sync NSFW setting from Firestore (account-level setting)
+      if(typeof udata.nsfw !== 'undefined'){
+        window.NSFW = !!udata.nsfw;
+        localStorage.setItem('nsfw', window.NSFW?'1':'0');
+      } else {
+        await setDoc(doc(db,'users',user.uid),{nsfw:window.NSFW},{merge:true});
+      }
+    } catch(e) { window.IS_ADMIN = isOwner; }
+    if(window._authResolve){ window._authResolve(user); window._authResolve=null; }
     onLogin(user);
     syncList(user.uid);
   } else {
     window.IS_ADMIN = false;
+    window.NSFW = false;
+    localStorage.setItem('nsfw','0');
+    if(window._authResolve){ window._authResolve(null); window._authResolve=null; }
     onLogout();
   }
 });
@@ -86,6 +109,10 @@ window._syncList = syncList;
   --bg:#08080f;--s1:#0e0e1c;--s2:#121220;--brd:#1c1c2e;
   --txt:#eeeeff;--dim:#8888aa;--muted:#44445a;
   --nav:rgba(8,8,15,.97);--inp:#151528}
+[data-theme="amoled"]{
+  --bg:#000000;--s1:#0a0a0a;--s2:#111111;--brd:#1a1a1a;
+  --txt:#ffffff;--dim:#888888;--muted:#333333;
+  --nav:rgba(0,0,0,.99);--inp:#0d0d0d}
 [data-theme="light"]{
   --bg:#f2f2fa;--s1:#fff;--s2:#fff;--brd:#dddded;
   --txt:#0d0d1e;--dim:#5a5a7a;--muted:#9090b0;
@@ -222,6 +249,7 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
   min-height:100vh;
   width:calc(100% - var(--sb));
   overflow-x:hidden;
+  box-sizing:border-box;
 }
 
 /* ═══ PAGES ═══════════════════════════════════════════ */
@@ -313,10 +341,9 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 .ci img{width:100%;height:100%;object-fit:cover;object-position:center 20%;transition:transform .4s;display:block}
 
 /* Mobile info panel */
-.mob-info-panel{display:none}
-@media(max-width:768px){
-  .mob-info-panel{
-    display:block;
+.mob-info-panel{display:none!important}
+@media(max-width:1024px){
+  .mob-info-panel{display:block!important;
     background:var(--s2);border:1px solid var(--brd);
     border-radius:var(--r);padding:12px;margin-bottom:14px;
   }
@@ -369,12 +396,12 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 .chip.on,.chip:hover{background:var(--red);border-color:var(--red);color:#fff}
 
 /* ═══ DETAIL ══════════════════════════════════════════ */
-.dh{position:relative;height:340px;overflow:hidden;max-width:100%}
+.dh{position:relative;height:340px;max-width:100%}
 .dh-bg{position:absolute;inset:0;width:100%;height:100%;
-       object-fit:cover;filter:blur(5px) brightness(.26) saturate(1.3);transform:scale(1.06)}
-.dh-ov{position:absolute;inset:0;
+       object-fit:cover;filter:blur(5px) brightness(.26) saturate(1.3);transform:scale(1.06);overflow:hidden}
+.dh-ov{position:absolute;inset:0;overflow:hidden;
        background:linear-gradient(to top,var(--bg) 0%,rgba(0,0,0,.1) 55%,transparent 100%)}
-.dh-top{position:absolute;bottom:0;left:0;right:0;padding:0 40px 24px;display:flex;align-items:flex-end;gap:22px;box-sizing:border-box}
+.dh-top{position:absolute;bottom:0;left:0;right:0;padding:0 40px 28px;display:flex;align-items:flex-end;gap:22px;box-sizing:border-box;overflow:visible}
 .d-cov{width:130px;min-width:130px;height:185px;border-radius:10px;overflow:hidden;
        border:2px solid rgba(255,255,255,.12);box-shadow:0 14px 40px rgba(0,0,0,.5);flex-shrink:0}
 .d-cov img{width:100%;height:100%;object-fit:cover}
@@ -382,6 +409,20 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
                font-weight:700;background:var(--red);color:#fff;margin-bottom:7px}
 .d-nm{font-size:clamp(18px,3.5vw,40px);font-weight:900;line-height:1.1;margin-bottom:5px}
 .d-en{font-size:12px;color:var(--dim);margin-bottom:10px}
+.heart-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  background:rgba(255,255,255,.1);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,.2);border-radius:100px;
+  padding:5px 12px 5px 9px;cursor:pointer;
+  color:#fff;font-size:13px;font-weight:700;
+  transition:all .2s;margin-top:6px;
+}
+.heart-btn:hover{background:rgba(230,57,70,.25);border-color:rgba(230,57,70,.5);transform:scale(1.05)}
+.heart-btn.liked{background:rgba(230,57,70,.3);border-color:var(--red);color:#fff}
+.heart-btn.liked .heart-ico{fill:var(--red);stroke:var(--red)}
+.heart-ico{width:16px;height:16px;transition:all .2s;flex-shrink:0}
+.heart-btn.liked .heart-ico{animation:heartpop .3s ease}
+@keyframes heartpop{0%{transform:scale(1)}50%{transform:scale(1.4)}100%{transform:scale(1)}}
 .d-st{display:flex;gap:14px;flex-wrap:wrap}
 .dsv{font-size:19px;font-weight:900;line-height:1}
 .dsl{font-size:10px;color:var(--muted);margin-top:2px}
@@ -432,22 +473,21 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 .back-btn:hover{border-color:var(--red);color:var(--red)}
 
 /* ─ Mobile action buttons row (above chapters) ─ */
-.mob-act-row{ display:none }
-@media(max-width:768px){
+.mob-act-row{ display:none!important }
+@media(max-width:1024px){
   .mob-act-row{
-    display:flex;
-    flex-wrap:wrap;
+    display:grid!important;
+    grid-template-columns:1fr 1fr;
     gap:8px;
     margin-bottom:14px;
+    width:100%;
   }
   .mob-act-row .abtn{
-    flex:1 1 calc(50% - 4px);
     justify-content:center;
     font-size:12px;
     padding:10px 8px;
     border-radius:10px;
-    width:auto;
-    height:auto;
+    width:100%;
     min-height:unset;
   }
 }
@@ -470,9 +510,46 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 }
 .rc:hover{background:var(--red);border-color:var(--red);color:#fff}
 .rcnt{font-size:12px;color:var(--dim);padding:0 5px}
+/* Reader info bar (time + page) */
+.r-infobar{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:4px 20px;font-size:10px;color:var(--muted);
+  background:var(--bg);border-bottom:1px solid var(--brd);
+  letter-spacing:.3px;
+}
+/* Scroll mode */
 .pw{max-width:800px;margin:0 auto;padding:20px 10px 80px;
     display:flex;flex-direction:column;align-items:center;gap:2px}
 .pimg{width:100%;border-radius:2px}
+/* Page-by-page mode */
+.pw.paged{
+  padding:0;max-width:100vw;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+  min-height:calc(100vh - 130px);
+  position:relative;
+}
+.pw.paged .pimg{
+  width:auto;max-width:100%;max-height:calc(100vh - 130px);
+  object-fit:contain;border-radius:0;
+  touch-action:pan-y pinch-zoom;
+}
+.pw.paged .pimg.hidden{display:none}
+/* Swipe zones */
+.swipe-zone{
+  position:absolute;top:0;width:40%;height:100%;
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;transition:opacity .15s;z-index:10;cursor:pointer;
+}
+.swipe-zone.left{left:0}
+.swipe-zone.right{right:0}
+.swipe-zone:active{opacity:.15;background:var(--txt)}
+/* Mode toggle button */
+.rmode-btn{
+  font-size:11px;padding:3px 8px;border-radius:6px;
+  background:var(--s2);border:1px solid var(--brd);
+  color:var(--dim);cursor:pointer;transition:all var(--t);white-space:nowrap;
+}
+.rmode-btn:hover{border-color:var(--red);color:var(--red)}
 .rft{
   position:sticky;bottom:0;
   background:rgba(8,8,15,.97);backdrop-filter:blur(12px);
@@ -595,8 +672,7 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 .ch-n{font-size:16px;font-weight:900;color:var(--muted);min-width:26px}
 .ch-nm{font-size:13px;font-weight:700}
 .ch-pg{font-size:11px;color:var(--muted)}
-.urow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--brd)}
-.urow:last-child{border-bottom:none}
+.urow{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--brd);flex-wrap:wrap}.urow:last-child{border-bottom:none}
 .uavt{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--red),var(--cyan));
       display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0}
 .unm3{font-size:13px;font-weight:700}
@@ -645,17 +721,24 @@ button{cursor:pointer;font-family:'Cairo',sans-serif}
 .div-l{text-align:center;color:var(--muted);font-size:11px;margin:10px 0;position:relative}
 .div-l::before,.div-l::after{content:'';position:absolute;top:50%;height:1px;background:var(--brd);width:41%}
 .div-l::before{right:0}.div-l::after{left:0}
-.socr{display:flex;gap:6px}
-.soc{flex:1;padding:7px;border-radius:8px;background:var(--s1);border:1px solid var(--brd);
+.socr{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.soc{padding:9px 7px;border-radius:10px;background:var(--s1);border:1px solid var(--brd);
      color:var(--txt);font-size:12px;font-weight:600;display:flex;align-items:center;
-     justify-content:center;gap:5px;transition:all var(--t)}
-.soc:hover{border-color:var(--red)}
+     justify-content:center;gap:6px;transition:all var(--t);cursor:pointer}
+.soc:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,.25)}
+.soc svg{flex-shrink:0}
+.soc-g:hover{border-color:#4285f4;color:#4285f4}
+.soc-f:hover{border-color:#1877f2;color:#1877f2}
+.soc-gh:hover{border-color:#aaa;color:var(--txt)}
+.soc-ph:hover{border-color:#25d366;color:#25d366}
 .mok{display:none;text-align:center;padding:12px 0}
 .mok-c{width:52px;height:52px;border-radius:50%;margin:0 auto 10px;
        background:rgba(74,220,128,.1);border:2px solid rgba(74,220,128,.3);
        display:flex;align-items:center;justify-content:center;font-size:22px}
 .mok h3{font-size:15px;font-weight:700;margin-bottom:5px}
 .mok p{font-size:12px;color:var(--muted)}
+.umt{flex:1;padding:5px 2px;border:none;background:transparent;color:var(--muted);font-size:11px;font-weight:600;border-radius:6px;transition:all var(--t);cursor:pointer;white-space:nowrap}
+.umt.on{background:var(--red);color:#fff;box-shadow:0 0 9px var(--glow)}
 
 /* ═══ CONFIRM ═════════════════════════════════════════ */
 .cm{position:fixed;inset:0;z-index:700;background:rgba(0,0,0,.8);
@@ -760,24 +843,24 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   .ast{grid-template-columns:1fr 1fr}
 }
 @media(max-width:900px){
-  :root{--sb:170px}
   .d-lay{grid-template-columns:1fr}
   .info-side{position:static}
   .ftg{grid-template-columns:1fr 1fr}
 }
 
 /* ══ MOBILE ══════════════════════════════════════════════ */
-@media(max-width:768px){
+@media(max-width:1024px){
   /* ── Hide desktop sidebar completely ── */
-  .sidebar{ display:none!important }
+  .sidebar{ display:none!important; visibility:hidden!important; width:0!important; min-width:0!important }
 
   /* ── Show mobile elements ── */
   .mob-nav{ display:block }
   .mob-top{ display:flex }
 
-  /* ── Main layout reset ── */
-  .main{ margin-right:0!important; width:100%!important }
+  /* ── Main layout reset — no margin since sidebar is gone ── */
+  .main{ margin-right:0!important; width:100%!important; max-width:100vw!important; min-width:0!important }
   .pg{ padding-bottom:80px!important }
+  body{ overflow-x:hidden }
 
   /* ── Hero ── */
   .hero{ min-height:auto; padding:76px 18px 36px }
@@ -808,7 +891,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   .chip{ padding:4px 12px; font-size:11px }
 
   /* ── Detail ── */
-  .dh{ height:230px }
+  .dh{ height:230px; overflow:visible }
   .dh-top{ padding:0 14px 12px; flex-direction:row; align-items:flex-end; gap:12px }
   .d-cov{ width:82px; min-width:82px; height:118px; border-radius:8px }
   .d-nm{ font-size:clamp(14px,5vw,22px); margin-bottom:3px }
@@ -816,7 +899,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   .d-st{ gap:10px }
   .dsv{ font-size:15px }
   .dsl{ font-size:9px }
-  .db{ padding:12px 14px 30px }
+  .db{ padding:12px 14px 30px; margin-top:8px }
   .d-lay{ grid-template-columns:1fr; gap:14px }
   .info-side{ display:none }
   .syn{ padding:12px; margin-bottom:12px }
@@ -832,7 +915,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   .rfb{ padding:7px 16px; font-size:12px }
 
   /* ── My List / Settings / Admin ── */
-  .mlw,.setw,.aw{ padding:76px 16px 20px }
+  .mlw,.setw,.aw{ padding:70px 14px 20px; width:100%; box-sizing:border-box; max-width:100% }
   .mlw h2,.setw h2,.aw h2{ font-size:20px; margin-bottom:14px }
   .ast{ grid-template-columns:1fr 1fr; gap:10px }
   .as{ padding:12px }
@@ -858,10 +941,63 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   .hero-btns{ flex-direction:column; align-items:stretch }
   .btn-r,.btn-g{ justify-content:center }
   .nums{ flex-wrap:wrap; gap:16px }
-  .dh{ height:200px }
+  .dh{ height:200px; overflow:visible }
   .d-cov{ width:70px; min-width:70px; height:100px }
 }
 
+/* ── Profile Page ── */
+.prof-header{display:flex;align-items:center;gap:16px;padding:20px 0 16px;border-bottom:1px solid var(--brd);margin-bottom:16px}
+.prof-av-circle{width:72px;height:72px;border-radius:50%;background:var(--red);display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:900;color:#fff;overflow:hidden;flex-shrink:0;position:relative}
+.prof-av-circle img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none}
+.prof-av-circle img.loaded{display:block}
+.prof-name{font-size:18px;font-weight:900}
+.prof-joined{font-size:11px;color:var(--muted);margin-top:3px}
+.social-links{display:flex;flex-wrap:wrap;gap:8px}
+.soc-btn{display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;background:var(--s2);border:1px solid var(--brd);font-size:12px;font-weight:600;color:var(--txt);text-decoration:none;transition:all .2s}
+.soc-btn:hover{border-color:var(--red);color:var(--red)}
+.prof-list-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.prof-list-card{aspect-ratio:2/3;border-radius:8px;overflow:hidden;position:relative;cursor:pointer}
+.prof-list-card img{width:100%;height:100%;object-fit:cover}
+
+/* ── Comments ── */
+.comments-wrap{padding:4px 0}
+.cmt-item{padding:12px 0;border-bottom:1px solid var(--brd);display:flex;gap:10px}
+.cmt-item:last-child{border-bottom:none}
+.cmt-av{width:34px;height:34px;border-radius:50%;background:var(--red);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0;overflow:hidden;cursor:pointer}
+.cmt-av img{width:100%;height:100%;object-fit:cover}
+.cmt-body{flex:1;min-width:0}
+.cmt-meta{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.cmt-author{font-size:12px;font-weight:700;cursor:pointer;color:var(--red)}
+.cmt-admin-badge{display:inline-flex;align-items:center;gap:3px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:9px;font-weight:800;padding:1px 7px;border-radius:20px;margin-inline-start:5px;vertical-align:middle;letter-spacing:.3px}
+.cmt-owner-badge{display:inline-flex;align-items:center;gap:3px;background:linear-gradient(135deg,#e11d48,#be123c);color:#fff;font-size:9px;font-weight:800;padding:1px 7px;border-radius:20px;margin-inline-start:5px;vertical-align:middle;letter-spacing:.3px}
+.cmt-date{font-size:10px;color:var(--muted)}
+.cmt-stars{font-size:11px;color:var(--gold)}
+.cmt-text{font-size:13px;line-height:1.6;word-break:break-word}
+.cmt-actions{display:flex;gap:12px;margin-top:6px}
+.cmt-like-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:3px;padding:0;transition:color .2s}
+.cmt-like-btn.liked{color:var(--red)}
+.cmt-del-btn{background:none;border:none;cursor:pointer;font-size:11px;color:var(--muted);padding:0}
+.star-pick span{font-size:20px;cursor:pointer;color:var(--muted);transition:color .15s}
+.star-pick span.on{color:var(--gold)}
+
+/* ── Language button ── */
+/* ── Chapter lock ── */
+.locked-row{opacity:.6;cursor:pointer}
+.locked-row:hover{opacity:.8}
+.lock-banner{background:linear-gradient(135deg,rgba(230,57,70,.12),rgba(230,57,70,.06));border:1px solid rgba(230,57,70,.25);border-radius:12px;padding:20px;text-align:center;margin:12px 0}
+.lock-banner h4{margin:0 0 6px;font-size:15px}
+.lock-banner p{margin:0 0 14px;font-size:12px;color:var(--muted)}
+
+/* ── Follow & Friends ── */
+.follow-btn{padding:8px 18px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid var(--brd);background:var(--s2);color:var(--txt);transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+.follow-btn.following{background:rgba(74,220,128,.1);border-color:rgba(74,220,128,.3);color:var(--green)}
+.follow-btn.requested{background:rgba(255,193,7,.1);border-color:rgba(255,193,7,.3);color:#ffc107}
+.prof-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.friends-count{font-size:12px;color:var(--muted);display:flex;gap:14px;margin-top:6px}
+.friends-count span{cursor:pointer}
+.friends-count span:hover{color:var(--txt)}
+.notif-dot{width:8px;height:8px;background:var(--red);border-radius:50%;display:inline-block;margin-right:3px}
+.friend-req-banner{background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.2);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px}
 
 </style>
 </head>
@@ -961,10 +1097,11 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
     <button class="mob-icon-btn" onclick="go('search')">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
     </button>
+    <!-- Language toggle -->
     <!-- Guest: login button -->
     <button class="mob-login-btn" id="mob-login-btn" onclick="openM('login')">دخول</button>
     <!-- Logged in: avatar -->
-    <div class="mob-av-btn" id="mob-av" onclick="openSettings()" style="display:none">أ</div>
+    <div class="mob-av-btn" id="mob-av" onclick="showMyProfile()" style="display:none">أ</div>
   </div>
 </div>
 
@@ -1002,7 +1139,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
     <div class="grid" id="hg"></div>
   </section>
   <section class="sec">
-    <div class="sh"><div class="st">🆕 أحدث الإضافات</div><span class="la" onclick="go('search')">شوف الكل ←</span></div>
+    <div class="sh"><div class="st">أحدث الإضافات</div><span class="la" onclick="go('search')">شوف الكل ←</span></div>
     <div class="grid" id="ng"></div>
   </section>
   <footer>
@@ -1039,6 +1176,12 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         <div class="d-tag" id="d-tag">مانجا</div>
         <div class="d-nm" id="d-nm">—</div>
         <div class="d-en" id="d-en">—</div>
+        <button class="heart-btn" id="d-heart" onclick="toggleLike()">
+          <svg class="heart-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+          </svg>
+          <span id="d-likes">0</span>
+        </button>
       </div>
     </div>
   </div>
@@ -1067,9 +1210,38 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         <div class="tabs" style="margin-bottom:14px">
           <button class="tb on" onclick="dtab(this,'ch')">الفصول</button>
           <button class="tb" onclick="dtab(this,'rel')">مشابهة</button>
+          <button class="tb" onclick="dtab(this,'comments')">التعليقات</button>
+        </div>
+        <div id="dl-bar" style="display:none;margin-bottom:10px;display:flex;gap:7px;flex-wrap:wrap">
+          <button class="ba2 bag sm" onclick="dlAllChaps()" id="dl-all-btn">⬇ تحميل الكل ZIP</button>
         </div>
         <div id="dt-ch" class="cl" style="display:flex;flex-direction:column"></div>
         <div id="dt-rel" class="grid" style="display:none"></div>
+
+        <!-- Comments -->
+        <div id="dt-comments" style="display:none;margin-top:16px">
+          <div class="comments-wrap">
+            <h3 style="margin-bottom:12px">التعليقات <span id="cmt-cnt" style="font-size:13px;color:var(--muted);font-weight:400"></span></h3>
+            <!-- Write comment (logged in only) -->
+            <div id="cmt-form" style="display:none;margin-bottom:16px">
+              <textarea class="ft" id="cmt-txt" placeholder="اكتب تعليقك..." style="min-height:70px;margin-bottom:8px"></textarea>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="ba2 bar sm" onclick="postComment()">نشر</button>
+                <div class="star-pick" id="cmt-stars">
+                  <span onclick="setCmtStar(1)" data-s="1">☆</span>
+                  <span onclick="setCmtStar(2)" data-s="2">☆</span>
+                  <span onclick="setCmtStar(3)" data-s="3">☆</span>
+                  <span onclick="setCmtStar(4)" data-s="4">☆</span>
+                  <span onclick="setCmtStar(5)" data-s="5">☆</span>
+                </div>
+              </div>
+            </div>
+            <div id="cmt-login-hint" style="display:none;color:var(--muted);font-size:12px;margin-bottom:12px;text-align:center">
+              <a href="#" onclick="openM('login')" style="color:var(--red)">سجّل دخول</a> <span>للتعليق</span>
+            </div>
+            <div id="cmt-list"></div>
+          </div>
+        </div>
       </div>
       <!-- Sidebar: info + action buttons (desktop only) -->
       <div class="info-side">
@@ -1097,8 +1269,13 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         <button class="rc" onclick="rnav(-1)">‹</button>
         <span class="rcnt" id="r-cnt">1/1</span>
         <button class="rc" onclick="rnav(1)">›</button>
+        <button class="rmode-btn" id="rmode-btn" onclick="toggleRMode()">صفحة بصفحة</button>
         <button class="rc" onclick="toggleTheme()" title="المظهر" style="font-size:14px">◐</button>
       </div>
+    </div>
+    <div class="r-infobar">
+      <span id="r-time">—</span>
+      <span id="r-pageno">صفحة 1</span>
     </div>
     <div class="pw" id="r-pgs"><div class="empty"><div class="ei" style="font-size:28px;opacity:.4">□</div><p>جاري التحميل...</p></div></div>
     <div class="rft">
@@ -1138,7 +1315,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
           <div>
             <div style="font-size:13px;font-weight:700;margin-bottom:8px">صورة الملف الشخصي</div>
             <div style="display:flex;gap:7px;flex-wrap:wrap">
-              <label class="ba2 bag" style="cursor:pointer">تغيير<input type="file" id="av-inp" accept="*/*" style="display:none" onchange="changeAvatar(this)"></label>
+              <label class="ba2 bag" style="cursor:pointer"><span>تغيير</span><input type="file" id="av-inp" accept="image/*" style="display:none" onchange="changeAvatar(this)"></label>
               <button class="ba2 bad" onclick="removeAvatar()">حذف</button>
             </div>
           </div>
@@ -1173,8 +1350,9 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
           <div><div style="font-size:13px;font-weight:700;margin-bottom:3px">الوضع الداكن</div><div style="font-size:12px;color:var(--muted)">تبديل المظهر</div></div>
           <div class="tog-sw" id="theme-sw" onclick="toggleTheme()"><div class="td"></div></div>
         </div>
-        <div style="display:flex;gap:10px">
+        <div style="display:flex;gap:10px;direction:ltr">
           <div class="th-card on" id="th-dark" onclick="setTheme('dark')"><div style="font-size:22px;margin-bottom:5px">◐</div><div style="font-size:12px;font-weight:700">داكن</div></div>
+          <div class="th-card" id="th-amoled" onclick="setTheme('amoled')"><div style="font-size:22px;margin-bottom:5px;color:#fff">⬛</div><div style="font-size:12px;font-weight:700">أسود</div></div>
           <div class="th-card" id="th-light" onclick="setTheme('light')"><div style="font-size:22px;margin-bottom:5px">○</div><div style="font-size:12px;font-weight:700">فاتح</div></div>
         </div>
       </div>
@@ -1190,7 +1368,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
           <div class="tog-sw" id="nsfw-sw" onclick="toggleNSFW(this)"><div class="td"></div></div>
         </div>
         <div id="nsfw-warn" style="display:none;margin-top:10px;padding:8px 10px;background:rgba(230,57,70,.08);border:1px solid rgba(230,57,70,.2);border-radius:8px;font-size:11px;color:var(--red)">
-          ⚠️ أنت توافق على أنك فوق 18 سنة. المحتوى الصريح سيظهر في النتائج.
+          ! أنت توافق على أنك فوق 18 سنة. المحتوى الصريح سيظهر في النتائج.
         </div>
       </div>
     </div>
@@ -1207,6 +1385,10 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         </div>
       </div>
     </div>
+    <div class="abox" style="margin-bottom:14px" id="friend-reqs-box" style="display:none">
+      <div class="abh"><h3>طلبات الصداقة <span id="freq-badge" style="display:none;background:var(--red);color:#fff;border-radius:100px;padding:1px 8px;font-size:11px;margin-right:6px">0</span></h3></div>
+      <div class="abb" id="friend-reqs-list"><div style="color:var(--muted);font-size:13px;text-align:center;padding:8px">لا توجد طلبات</div></div>
+    </div>
     <div class="abox" style="border-color:rgba(230,57,70,.3);margin-bottom:14px">
       <div class="abh" style="border-color:rgba(230,57,70,.2)"><h3 style="color:var(--red)">منطقة الخطر</h3></div>
       <div class="abb">
@@ -1222,6 +1404,67 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- PROFILE PAGE -->
+<div class="pg" id="pg-profile">
+  <div class="setw">
+    <div class="prof-header">
+      <div class="prof-av" id="prof-av-wrap">
+        <div class="prof-av-circle" id="prof-av-circle"><span id="prof-av-txt">؟</span><img id="prof-av-img" src="" alt=""></div>
+      </div>
+      <div class="prof-names">
+        <div class="prof-name" id="prof-name">—</div>
+        <div id="prof-role-badge" style="display:none;margin:3px 0 2px"></div>
+        <div class="prof-joined" id="prof-joined"></div>
+        <div class="friends-count"><span onclick="showFriendsList('followers')">متابعون: <b id="prof-followers">0</b></span><span onclick="showFriendsList('following')">يتابع: <b id="prof-following">0</b></span><span>أصدقاء: <b id="prof-friends">0</b></span></div>
+        <div class="prof-actions" id="prof-actions"></div>
+      </div>
+    </div>
+    <!-- Bio -->
+    <div class="abox" style="margin-bottom:14px">
+      <div class="abh"><h3>نبذة</h3></div>
+      <div class="abb"><p id="prof-bio" style="font-size:13px;line-height:1.7;color:var(--muted)">لا توجد نبذة</p></div>
+    </div>
+    <!-- Social links -->
+    <div class="abox" style="margin-bottom:14px">
+      <div class="abh"><h3>روابط التواصل</h3></div>
+      <div class="abb" id="prof-social">
+        <div class="social-empty" style="color:var(--muted);font-size:13px;text-align:center;padding:8px">لا توجد روابط</div>
+      </div>
+    </div>
+    <!-- Stats -->
+    <div class="abox" style="margin-bottom:14px">
+      <div class="abh"><h3>الإحصائيات</h3></div>
+      <div class="abb">
+        <div class="ast" style="grid-template-columns:repeat(3,1fr)">
+          <div class="as"><div class="av2" id="prof-cnt-watch">0</div><div class="al">بكمّل</div></div>
+          <div class="as"><div class="av2" id="prof-cnt-done">0</div><div class="al">أتممت</div></div>
+          <div class="as"><div class="av2" id="prof-cnt-fav">0</div><div class="al">مفضلة</div></div>
+        </div>
+      </div>
+    </div>
+    <!-- Lists preview -->
+    <div class="abox" style="margin-bottom:14px">
+      <div class="abh"><h3>القوائم</h3></div>
+      <div class="abb" id="prof-lists"><div style="color:var(--muted);font-size:13px;text-align:center;padding:8px">جاري التحميل...</div></div>
+    </div>
+    <!-- Edit profile (own profile only) -->
+    <div id="prof-edit-wrap" style="display:none">
+      <div class="abox" style="margin-bottom:14px">
+        <div class="abh"><h3>تعديل الملف الشخصي</h3></div>
+        <div class="abb">
+          <div class="fg" style="margin-bottom:10px"><label class="fl">نبذة شخصية</label><textarea class="ft" id="edit-bio" placeholder="اكتب شيئاً عن نفسك..."></textarea></div>
+          <div class="fg" style="margin-bottom:10px"><label class="fl">Facebook</label><input class="fi" id="edit-fb" placeholder="https://facebook.com/..."></div>
+          <div class="fg" style="margin-bottom:10px"><label class="fl">Telegram</label><input class="fi" id="edit-tg" placeholder="https://t.me/..."></div>
+          <div class="fg" style="margin-bottom:10px"><label class="fl">Twitter / X</label><input class="fi" id="edit-tw" placeholder="https://x.com/..."></div>
+          <div class="fg" style="margin-bottom:10px"><label class="fl">Discord</label><input class="fi" id="edit-dc" placeholder="username#0000"></div>
+          <button class="ba2 bar" onclick="saveProfile()">حفظ التعديلات</button>
+        </div>
+      </div>
+    </div>
+    <button onclick="goBack()" class="back-btn" style="margin-top:4px">← رجوع</button>
   </div>
 </div>
 
@@ -1248,6 +1491,13 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
         <div class="abh"><h3>آخر العناوين</h3><button class="ba2 bar sm" onclick="atab(null,'add')">+ إضافة</button></div>
         <div class="abb" id="ad-rec">جاري التحميل...</div>
       </div>
+      <div class="abox" style="margin-top:12px">
+        <div class="abh"><h3>🔧 أدوات</h3></div>
+        <div class="abb">
+          <button class="ba2 bag" id="fix-cnt-btn" onclick="fixAllChapterCounts()">🔄 إصلاح عدادات الفصول</button>
+          <div id="fix-cnt-res" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+        </div>
+      </div>
     </div>
     <div id="ad-titles" style="display:none">
       <div style="display:flex;justify-content:flex-end;margin-bottom:12px"><button class="ba2 bar" onclick="atab(null,'add')">+ إضافة</button></div>
@@ -1260,6 +1510,18 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
     </div>
     <div id="ad-add" style="display:none">
       <input type="hidden" id="eid">
+      <!-- Kotatsu Import -->
+      <div class="abox" style="margin-bottom:12px;border:1px solid rgba(230,57,70,.25);background:rgba(230,57,70,.04)">
+        <div class="abh"><h3>📋 استيراد من Kotatsu JSON</h3></div>
+        <div class="abb">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:10px">الصق الـ JSON من تطبيق Kotatsu — سيتم ملء كل الحقول تلقائياً</div>
+          <textarea class="ft" id="ktsu-json" placeholder='{"title":"Solo Leveling","cover":"...","chapters":{...}}' style="height:100px;font-size:11px;direction:ltr"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+            <button class="ba2 bar sm" onclick="importKotatsu()">⚡ استيراد</button>
+            <span id="ktsu-res" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+        </div>
+      </div>
       <div class="abox">
         <div class="abh"><h3 id="add-h">إضافة عنوان جديد</h3></div>
         <div class="abb">
@@ -1282,7 +1544,7 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
           <div class="fg" style="margin-top:4px">
             <label class="fl">صورة الغلاف</label>
             <div class="uz" id="cz" ondragover="dov(event,'cz')" ondragleave="dlv('cz')" ondrop="dropc(event)">
-              <input type="file" id="ci" accept="*/*" onchange="prevc(this)">
+              <input type="file" id="ci" accept="image/*" onchange="prevc(this)">
               <div id="cprev"><div class="uz-i" style="font-size:28px;color:var(--muted)">↑</div><div class="uz-t">اسحب الغلاف أو اضغط</div><div class="uz-s">PNG · JPG · WEBP</div></div>
             </div>
             <div class="pw2" id="cpw"><div class="pb"><div class="pf" id="cpf"></div></div><div class="pt" id="cpt">0%</div></div>
@@ -1305,23 +1567,29 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
             <div class="fg"><label class="fl">رقم الفصل *</label><input class="fi" id="ch-n" type="number" placeholder="1" step="0.1"></div>
             <div class="fg"><label class="fl">اسم الفصل</label><input class="fi" id="ch-nm2" placeholder="اختياري"></div>
           </div>
-          <div class="fg">
+          <!-- Upload method tabs -->
+          <div style="display:flex;background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:3px;margin-bottom:14px;gap:3px">
+            <button class="umt on" id="umt-img" onclick="setUMT('img')">🖼 صور</button>
+            <button class="umt" id="umt-pdf" onclick="setUMT('pdf')">📄 PDF</button>
+            <button class="umt" id="umt-zip" onclick="setUMT('zip')">🗜 ZIP</button>
+            <button class="umt" id="umt-url" onclick="setUMT('url')">🔗 روابط</button>
+            <button class="umt" id="umt-json" onclick="setUMT('json')">📋 JSON</button>
+          </div>
+
+          <!-- Images method -->
+          <div id="um-img">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px">
               <label class="fl" style="margin:0">صفحات الفصل *</label>
-              <div id="pg-counter" style="display:none;background:rgba(230,57,70,.1);border:1px solid rgba(230,57,70,.25);border-radius:100px;padding:3px 12px;font-size:12px;font-weight:700;color:var(--red)">
-                0 صفحة
-              </div>
+              <div id="pg-counter" style="display:none;background:rgba(230,57,70,.1);border:1px solid rgba(230,57,70,.25);border-radius:100px;padding:3px 12px;font-size:12px;font-weight:700;color:var(--red)">0 صفحة</div>
             </div>
-            <!-- Upload zone -->
             <div class="uz" id="pz" ondragover="dov(event,'pz')" ondragleave="dlv('pz')" ondrop="dropp(event)">
-              <input type="file" id="pi" multiple onchange="prevp(this.files)">
+              <input type="file" id="pi" accept="image/*" multiple onchange="prevp(this.files)">
               <div id="pz-inner">
                 <div class="uz-i" style="font-size:28px;color:var(--muted)">↑</div>
                 <div class="uz-t">اسحب الصفحات أو اضغط للاختيار</div>
                 <div class="uz-s">يمكنك اختيار أكثر من صورة دفعة واحدة · بالترتيب</div>
               </div>
             </div>
-            <!-- Image counter bar -->
             <div id="pg-bar" style="display:none;margin-top:10px;background:var(--s1);border:1px solid var(--brd);border-radius:9px;padding:10px 12px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
                 <span style="font-size:12px;font-weight:700">الصفحات المختارة</span>
@@ -1331,17 +1599,60 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
                   <button onclick="clearPages()" style="padding:2px 8px;border-radius:5px;background:rgba(230,57,70,.1);border:1px solid rgba(230,57,70,.2);color:var(--red);font-size:10px;font-weight:700;margin-right:4px">✕ مسح</button>
                 </div>
               </div>
-              <!-- Thumbnails grid -->
               <div id="ptrow" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:6px"></div>
-              <!-- Add more button -->
               <label style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:8px;border:1px dashed var(--brd);border-radius:8px;cursor:pointer;font-size:12px;color:var(--dim);transition:all .2s" onmouseover="this.style.borderColor='var(--red)';this.style.color='var(--red)'" onmouseout="this.style.borderColor='var(--brd)';this.style.color='var(--dim)'">
-                <input type="file" accept="*/*" multiple onchange="addMorePages(this.files)" style="display:none">
-                ➕ إضافة المزيد
+                <input type="file" accept="image/*" multiple onchange="addMorePages(this.files)" style="display:none">+ إضافة المزيد
               </label>
             </div>
-            <div class="pw2" id="ppw"><div class="pb"><div class="pf" id="ppf"></div></div><div class="pt" id="ppt">جاري الرفع...</div></div>
           </div>
-          <button class="ba2 bar" id="schb" onclick="saveChap()" style="margin-top:12px">رفع الفصل</button>
+
+          <!-- PDF method -->
+          <div id="um-pdf" style="display:none">
+            <div class="uz" id="pdf-zone" ondragover="dov(event,'pdf-zone')" ondragleave="dlv('pdf-zone')" ondrop="dropPDF(event)">
+              <input type="file" id="pdf-inp" accept=".pdf,application/pdf" onchange="selPDF(this.files[0])">
+              <div id="pdf-zone-inner">
+                <div style="font-size:28px;color:var(--muted)">📄</div>
+                <div class="uz-t">اسحب ملف PDF أو اضغط</div>
+                <div class="uz-s">سيتم تحويل كل صفحة PDF إلى صورة</div>
+              </div>
+            </div>
+            <div id="pdf-info" style="display:none;margin-top:10px;padding:10px 12px;background:var(--s1);border:1px solid var(--brd);border-radius:9px;font-size:13px"></div>
+          </div>
+
+          <!-- ZIP/CBZ method -->
+          <div id="um-zip" style="display:none">
+            <div class="uz" id="zip-zone" ondragover="dov(event,'zip-zone')" ondragleave="dlv('zip-zone')" ondrop="dropZIP(event)">
+              <input type="file" id="zip-inp" accept=".zip,.cbz,.rar" onchange="selZIP(this.files[0])">
+              <div id="zip-zone-inner">
+                <div style="font-size:28px;color:var(--muted)">🗜</div>
+                <div class="uz-t">اسحب ملف ZIP / CBZ أو اضغط</div>
+                <div class="uz-s">سيتم استخراج الصور تلقائياً بالترتيب</div>
+              </div>
+            </div>
+            <div id="zip-info" style="display:none;margin-top:10px;padding:10px 12px;background:var(--s1);border:1px solid var(--brd);border-radius:9px;font-size:13px"></div>
+          </div>
+
+          <!-- URLs method -->
+          <div id="um-url" style="display:none">
+            <label class="fl">روابط الصور (رابط لكل سطر)</label>
+            <textarea class="ft" id="url-inp" placeholder="https://example.com/page1.jpg&#10;https://example.com/page2.jpg&#10;https://example.com/page3.jpg" style="height:140px;font-size:12px;direction:ltr"></textarea>
+            <div style="font-size:11px;color:var(--muted);margin-top:5px">كل رابط في سطر منفصل · الروابط المباشرة للصور فقط</div>
+          </div>
+
+          <!-- JSON method -->
+          <div id="um-json" style="display:none">
+            <label class="fl">JSON كود (مثل arabtoons / kotatsu)</label>
+            <textarea class="ft" id="json-inp" placeholder='{"chapters":{"id":{"number":1,"name":"الفصل 1","url":"/manga/ch1"}}}&#10;أو الصق JSON الكامل' style="height:140px;font-size:11px;direction:ltr"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="ba2 bag sm" onclick="parseJSONChaps()">📋 استخراج الفصول</button>
+              <span id="json-res" style="font-size:12px;color:var(--muted);align-self:center"></span>
+            </div>
+            <!-- JSON parsed chapters list -->
+            <div id="json-clist" style="display:none;margin-top:10px;max-height:200px;overflow-y:auto;background:var(--s1);border:1px solid var(--brd);border-radius:9px;padding:8px"></div>
+          </div>
+
+          <div class="pw2" id="ppw"><div class="pb"><div class="pf" id="ppf"></div></div><div class="pt" id="ppt">جاري الرفع...</div></div>
+          <button class="ba2 bar" id="schb" onclick="saveChap()" style="margin-top:12px">رفع الفصل ↑</button>
         </div>
       </div>
       <div class="abox" id="clist" style="display:none">
@@ -1365,19 +1676,19 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   <div class="mob-nav-inner">
     <div class="mob-ni on" id="mni-home" onclick="go('home')">
       <svg class="mi2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-      <div>الرئيسية</div>
+      <div class="mn-lbl">الرئيسية</div>
     </div>
     <div class="mob-ni" id="mni-search" onclick="go('search')">
       <svg class="mi2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <div>استكشف</div>
+      <div class="mn-lbl">استكشف</div>
     </div>
     <div class="mob-ni" id="mni-mylist" onclick="go('mylist')">
       <svg class="mi2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-      <div>قوائمي</div>
+      <div class="mn-lbl">قوائمي</div>
     </div>
     <div class="mob-ni" id="mni-settings" onclick="openSettings()">
       <svg class="mi2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      <div>إعدادات</div>
+      <div class="mn-lbl">إعدادات</div>
     </div>
   </div>
 </nav>
@@ -1394,24 +1705,44 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
       <button class="mt3 on" id="mt-li" onclick="sw('login')">دخول</button>
       <button class="mt3" id="mt-su" onclick="sw('signup')">حساب جديد</button>
     </div>
+
+    <!-- LOGIN -->
     <div id="mf-li">
       <div class="fg" style="margin-bottom:11px"><label class="fl">البريد الإلكتروني</label><input type="email" class="fi" id="li-em" placeholder="example@email.com"><div class="ferr" id="li-err"></div></div>
       <div class="fg" style="margin-bottom:11px"><label class="fl">كلمة المرور</label><input type="password" class="fi" id="li-pw" placeholder="••••••••"></div>
       <button class="fsb" id="li-btn" onclick="doLogin()">دخول ←</button>
-      <div class="div-l">أو</div>
+      <div class="div-l">أو تسجيل بـ</div>
       <div class="socr">
-        <button class="soc" onclick="doGoogle()">Google</button>
-        <button class="soc" onclick="toast('💬','Discord قريباً!')" style="opacity:.5;cursor:not-allowed">Discord</button>
+        <button class="soc soc-g" onclick="doGoogle()">
+          <svg width="15" height="15" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Google
+        </button>
+        <button class="soc soc-gh" onclick="doGithub()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </button>
       </div>
     </div>
+
+    <!-- SIGNUP -->
     <div id="mf-su" style="display:none">
       <div class="fg" style="margin-bottom:11px"><label class="fl">اسم المستخدم</label><input type="text" class="fi" id="su-nm" placeholder="otaku_ar"><div class="ferr" id="su-err"></div></div>
       <div class="fg" style="margin-bottom:11px"><label class="fl">البريد الإلكتروني</label><input type="email" class="fi" id="su-em" placeholder="example@email.com"></div>
       <div class="fg" style="margin-bottom:11px"><label class="fl">كلمة المرور (8+)</label><input type="password" class="fi" id="su-pw" placeholder="••••••••"></div>
       <button class="fsb" id="su-btn" onclick="doSignup()">سجّل مجانًا ←</button>
-      <div class="div-l">أو</div>
-      <div class="socr"><button class="soc" onclick="doGoogle()">Google</button></div>
+      <div class="div-l">أو سجّل بـ</div>
+      <div class="socr">
+        <button class="soc soc-g" onclick="doGoogle()">
+          <svg width="15" height="15" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Google
+        </button>
+        <button class="soc soc-gh" onclick="doGithub()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+          GitHub
+        </button>
+      </div>
     </div>
+
     <div class="mok" id="m-ok">
       <div class="mok-c">✓</div>
       <h3 id="ok-ti">تم!</h3><p id="ok-ms">مرحباً بك!</p>
@@ -1431,6 +1762,75 @@ footer{background:var(--s1);border-top:1px solid var(--brd);padding:36px 40px}
   </div>
 </div>
 
+<!-- Chapter Edit Modal -->
+<div class="cm" id="chedit-m" onclick="if(event.target===this)closeChapEdit()">
+  <div class="cmb" style="max-width:520px;width:94vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 id="chedit-title">تعديل الفصل</h3>
+      <button onclick="closeChapEdit()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">✕</button>
+    </div>
+    <!-- Name edit -->
+    <div class="fg" style="margin-bottom:12px">
+      <label class="fl">اسم الفصل</label>
+      <input class="fi" id="chedit-name" placeholder="اسم الفصل">
+    </div>
+    <!-- Current pages -->
+    <div style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <label class="fl" style="margin:0">الصفحات الحالية</label>
+        <span id="chedit-pgcount" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="chedit-pglist" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:6px;max-height:180px;overflow-y:auto;background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:8px"></div>
+    </div>
+    <!-- Add pages method tabs -->
+    <div style="margin-bottom:10px">
+      <label class="fl">إضافة صفحات جديدة</label>
+      <div style="display:flex;background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:3px;gap:3px;margin-top:6px">
+        <button class="umt on" id="cedit-t-img" onclick="setCEditMT('img')">🖼 صور</button>
+        <button class="umt" id="cedit-t-pdf" onclick="setCEditMT('pdf')">📄 PDF</button>
+        <button class="umt" id="cedit-t-zip" onclick="setCEditMT('zip')">🗜 ZIP</button>
+        <button class="umt" id="cedit-t-url" onclick="setCEditMT('url')">🔗 روابط</button>
+      </div>
+    </div>
+    <div id="cedit-img" style="margin-bottom:10px">
+      <div class="uz" style="min-height:80px" ondragover="dov(event,'cedit-uz')" ondragleave="dlv('cedit-uz')">
+        <input type="file" id="cedit-pi" accept="image/*" multiple onchange="setCEditPages(this.files)">
+        <div style="font-size:22px;color:var(--muted)">↑</div>
+        <div class="uz-t">اسحب صور إضافية أو اضغط</div>
+      </div>
+    </div>
+    <div id="cedit-pdf" style="display:none;margin-bottom:10px">
+      <div class="uz" style="min-height:80px">
+        <input type="file" id="cedit-pdf-inp" accept=".pdf,application/pdf" onchange="setCEditPDF(this.files[0])">
+        <div style="font-size:22px;color:var(--muted)">📄</div>
+        <div class="uz-t">اختر PDF</div>
+      </div>
+      <div id="cedit-pdf-info" style="font-size:12px;color:var(--muted);margin-top:5px"></div>
+    </div>
+    <div id="cedit-zip" style="display:none;margin-bottom:10px">
+      <div class="uz" style="min-height:80px">
+        <input type="file" id="cedit-zip-inp" accept=".zip,.cbz" onchange="setCEditZIP(this.files[0])">
+        <div style="font-size:22px;color:var(--muted)">🗜</div>
+        <div class="uz-t">اختر ZIP / CBZ</div>
+      </div>
+      <div id="cedit-zip-info" style="font-size:12px;color:var(--muted);margin-top:5px"></div>
+    </div>
+    <div id="cedit-url" style="display:none;margin-bottom:10px">
+      <textarea class="ft" id="cedit-url-inp" placeholder="رابط لكل سطر&#10;https://example.com/page1.jpg" style="height:90px;font-size:12px;direction:ltr"></textarea>
+    </div>
+    <!-- new pages preview -->
+    <div id="cedit-new-preview" style="display:none;margin-bottom:10px;background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:8px">
+      <div style="font-size:12px;font-weight:700;margin-bottom:6px">صفحات جديدة: <span id="cedit-new-count" style="color:var(--red)">0</span></div>
+      <div id="cedit-new-thumbs" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(55px,1fr));gap:5px"></div>
+    </div>
+    <div class="pw2" id="cedit-pw"><div class="pb"><div class="pf" id="cedit-pf"></div></div><div class="pt" id="cedit-pt">جاري الرفع...</div></div>
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <button class="ba2 bar" id="chedit-save" onclick="saveChapEdit()">💾 حفظ التعديلات</button>
+      <button class="ba2 bag" onclick="closeChapEdit()">إلغاء</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast-el"><span id="t-ico">✓</span><span id="t-msg">تم</span></div>
 
 <script>
@@ -1442,13 +1842,27 @@ const persist = () => localStorage.setItem('vl', JSON.stringify(window.MY_LIST))
 const $ = id => document.getElementById(id);
 
 /* ═══ HELPERS ═════════════════════════════════════════ */
-const TL  = t => ({anime:'أنمي',manga:'مانجا',manhwa:'مانهوا',manhua:'مانهوا صينية'}[t]||'مانجا');
+const TL = t => ({anime:'أنمي',manga:'مانجا',manhwa:'مانهوا',manhua:'مانهوا صينية'}[t]||'مانجا');
 const TC  = t => ({anime:'ta',manga:'tm',manhwa:'tmh',manhua:'tmu'}[t]||'tm');
+const TStatus = s => {
+  if(!s) return '—';
+  if(s==='ongoing'||s==='Ongoing') return 'جاري';
+  if(s==='completed'||s==='Completed') return 'مكتمل';
+  if(s==='paused'||s==='Paused') return 'متوقف';
+  return s;
+};
 const TAC = t => ({anime:'ba',manga:'bm',manhwa:'bmh',manhua:'bmh'}[t]||'bm');
 
-const NSFW_GENRES = ['هنتاي','إيتشي','ecchi','hentai','adult','18+','يوري','yaoi'];
-const isNSFW = t => !!(t.nsfw) || (t.genres||[]).some(g=>NSFW_GENRES.includes(g.toLowerCase()));
-const visibleTitles = () => window.NSFW ? TITLES : TITLES.filter(t=>!isNSFW(t));
+const NSFW_GENRES = ['هنتاي','إيتشي','ecchi','hentai','adult','18+','+18','يوري','ياوي','yaoi','yuri','بالغين','للبالغين','مثير','جنسي'];
+const isNSFW = t => {
+  if(t.nsfw) return true;
+  const genres = (t.genres||[]).map(g=>g.toLowerCase().trim());
+  return genres.some(g => NSFW_GENRES.some(n => g.includes(n.toLowerCase())));
+};
+const visibleTitles = () => {
+  // NSFW shown to everyone if enabled (no login required)
+  return window.NSFW ? TITLES : TITLES.filter(t => !isNSFW(t));
+};
 
 /* ═══ LOAD ════════════════════════════════════════════ */
 async function loadTitles(){
@@ -1467,7 +1881,8 @@ async function loadTitles(){
     $('as-c').textContent=ct;
     rAdDash(); rTitles(); fillSel();
   } catch(e){
-    $('hg').innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="ei">⚠️</div><p>${e.message}</p></div>`;
+    console.error('loadTitles error:', e);
+    $('hg').innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="ei" style="font-size:28px;opacity:.3">!</div><p style="color:var(--muted);font-size:12px">${e.message}</p></div>`;
   }
 }
 
@@ -1478,35 +1893,62 @@ async function loadUsers(){
     $('as-u').textContent=snap.size;
     $('u-cnt').textContent=snap.size+' مستخدم';
     const us=[]; snap.forEach(d=>us.push({...d.data(),id:d.id}));
-    $('u-list').innerHTML=us.length?us.map(u=>`
+    const ownerEmail = window.ADMIN;
+    $('u-list').innerHTML=us.length?us.map(u=>{
+      const isOwner = u.email === ownerEmail;
+      const isAdm = u.role === 'admin';
+      return `
       <div class="urow">
         <div class="uavt">${(u.name||u.email||'?')[0].toUpperCase()}</div>
-        <div style="flex:1;min-width:0"><div class="unm3">${u.name||'بدون اسم'}</div><div class="uem">${u.email||u.id}</div></div>
-        <span class="urole ${u.role==='admin'?'adm':''}">${u.role==='admin'?'أدمن':'مستخدم'}</span>
-        ${u.role!=='admin'?`<button class="ba2 bagr sm" onclick="mkAdm('${u.id}')">🔑 أدمن</button>`:''}
-      </div>`).join(''):'<p style="color:var(--muted);text-align:center;padding:16px">لا يوجد مستخدمون</p>';
+        <div style="flex:1;min-width:0">
+          <div class="unm3">${u.name||'بدون اسم'}${isOwner?` <span style="background:var(--red);color:#fff;font-size:9px;padding:1px 6px;border-radius:4px;font-weight:700">مالك</span>`:isAdm?` <span style="background:#2563eb;color:#fff;font-size:9px;padding:1px 6px;border-radius:4px;font-weight:700">أدمن</span>`:''}
+          </div>
+          <div class="uem">${u.email||u.id}</div>
+        </div>
+        <span class="urole ${isAdm?'adm':''}">${isAdm?'أدمن':'مستخدم'}</span>
+        ${!isAdm?`<button class="ba2 bagr sm" onclick="mkAdm('${u.id}')">أدمن ↑</button>`:''}
+        ${isAdm&&!isOwner?`<button class="ba2 bad sm" onclick="rmAdm('${u.id}','${u.name||u.email||''}')">إزالة</button>`:''}
+      </div>`;
+    }).join(''):'<p style="color:var(--muted);text-align:center;padding:16px">لا يوجد مستخدمون</p>';
   } catch(e){}
 }
 
 async function loadChaps(tid){
-  const {collection,getDocs,query,orderBy}=window.$fb;
+  const {collection,getDocs,query,orderBy,doc,updateDoc}=window.$fb;
   $('ch-list').innerHTML='<p style="color:var(--muted)">جاري التحميل...</p>';
   try {
     const snap=await getDocs(query(collection(window.$db,`titles/${tid}/chapters`),orderBy('number')));
     const ch=[]; snap.forEach(d=>ch.push({...d.data(),id:d.id}));
-    $('ch-cnt').textContent=ch.length+' فصل';
-    $('ch-list').innerHTML=ch.length?ch.map(c=>`
+    const realCount=ch.length;
+    $('ch-cnt').textContent=realCount+' فصل';
+    // Sync chaptersCount in Firestore + local cache
+    await updateDoc(doc(window.$db,'titles',tid),{chaptersCount:realCount});
+    const t=TITLES.find(x=>x.id===tid);
+    if(t) t.chaptersCount=realCount;
+    $('ch-list').innerHTML=realCount?ch.map(c=>`
       <div class="chrow">
         <div class="ch-n">${c.number}</div>
-        <div style="flex:1"><div class="ch-nm">${c.name||'الفصل '+c.number}</div><div class="ch-pg">${(c.pages||[]).length} صفحة</div></div>
-        <button class="ba2 bad sm" onclick="askDel('chap','${tid}/${c.id}','الفصل ${c.number}')">🗑️</button>
+        <div style="flex:1"><div class="ch-nm">${c.name||'الفصل '+c.number}</div><div class="ch-pg">${(c.pages||[]).length} صفحة ${c.sourceUrl?`· <a href="${c.sourceUrl}" target="_blank" style="color:var(--muted);font-size:10px">رابط ↗</a>`:''}</div></div>
+        <div style="display:flex;gap:5px">
+          <button class="ba2 bag sm ch-edit-btn" data-tid="${tid}" data-cid="${c.id}" data-num="${c.number}" data-pgcount="${(c.pages||[]).length}">✏️</button>
+          <button class="ba2 bad sm" onclick="askDel('chap','${tid}/${c.id}','الفصل ${c.number}')"><svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><polyline points='3 6 5 6 21 6'/><path d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/><path d='M10 11v6M14 11v6'/><path d='M9 6V4h6v2'/></svg></button>
+        </div>
       </div>`).join(''):'<p style="color:var(--muted);text-align:center;padding:14px">لا توجد فصول بعد</p>';
+    // Bind edit buttons via event delegation (avoids quote escaping issues)
+    $('ch-list').querySelectorAll('.ch-edit-btn').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        const chData = ch.find(x=>x.id===btn.dataset.cid);
+        openChapEdit(btn.dataset.tid, btn.dataset.cid, btn.dataset.num, chData?.name||'', btn.dataset.pgcount, chData?.pages||[]);
+      });
+    });
   } catch(e){$('ch-list').innerHTML=`<p style="color:var(--muted)">خطأ: ${e.message}</p>`;}
 }
 
 window.addEventListener('DOMContentLoaded',()=>{
-  loadTitles();loadUsers();
+  window._authReady.then(() => { loadTitles(); });
+  loadUsers();
   initNSFW();
+  initRouting();
   // Restore saved theme
   const saved=localStorage.getItem('theme');
   if(saved){document.documentElement.setAttribute('data-theme',saved);updThemeUI(saved==='dark');}
@@ -1518,13 +1960,17 @@ window.addEventListener('DOMContentLoaded',()=>{
 /* ═══ RENDER ══════════════════════════════════════════ */
 function rGrid(id,items){
   const el=$(id); if(!el) return;
-  if(!items.length){el.innerHTML='<div class="empty"><div class="ei">📭</div><p>لا توجد عناوين</p></div>';return;}
-  el.innerHTML=items.map(t=>`
+  if(!items.length){el.innerHTML=`<div class="empty"><div class="ei" style="font-size:28px;opacity:.3">—</div><p>${'لا توجد عناوين'}</p></div>`;return;}
+  el.innerHTML=items.map(t=>{
+    const prog=window.MY_LIST[t.id];
+    const pct=prog&&t.chaptersCount?(Math.min(100,Math.round((prog.progress/t.chaptersCount)*100))):-1;
+    return `
     <div class="card" onclick="showDet('${t.id}')">
       <div class="ci">
         <img src="${t.coverUrl||''}" alt="${t.nameAr||''}" loading="lazy"
-          onerror="this.parentElement.innerHTML='<div style=\\'display:flex;align-items:center;justify-content:center;height:100%;font-size:36px;background:var(--brd)\\'>🎌</div>'">
+          onerror="this.parentElement.innerHTML='<div style=\\'display:flex;align-items:center;justify-content:center;height:100%;font-size:20px;background:var(--brd);color:var(--muted)\\'>؟</div>'">
         <span class="cb-tag ${TC(t.type)}">${TL(t.type)}</span>
+        ${pct>=0?`<span style="position:absolute;bottom:5px;left:5px;background:rgba(0,0,0,.75);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px">${pct}%</span>`:''}
       </div>
       <div class="cb">
         <div class="cn">${t.nameAr||'—'}</div>
@@ -1533,7 +1979,7 @@ function rGrid(id,items){
           <span class="ce">${t.chaptersCount||0} ${t.type==='anime'?'حلقة':'فصل'}</span>
         </div>
       </div>
-    </div>`).join('');
+    </div>`}).join('');
   fi(el.querySelectorAll('.card'));
 }
 
@@ -1546,19 +1992,19 @@ function skels(id,n){const el=$(id);if(el)el.innerHTML=Array(n).fill('<div class
 function htab(btn,f){btn.closest('.tabs').querySelectorAll('.tb').forEach(b=>b.classList.remove('on'));btn.classList.add('on');rGrid('hg',f==='all'?TITLES:TITLES.filter(t=>t.type===f));}
 
 /* ═══ SEARCH ══════════════════════════════════════════ */
-const CHIPS=[{id:'all',l:'الكل'},{id:'manga',l:'مانجا'},{id:'manhwa',l:'مانهوا'},{id:'anime',l:'أنمي'},{id:'completed',l:'مكتمل'},{id:'ongoing',l:'جاري'}];
 function rSearch(){
   const ch=$('fc');
-  if(ch) ch.innerHTML=CHIPS.map(c=>`<button class="chip ${c.id===F?'on':''}" onclick="sf('${c.id}')">${c.l}</button>`).join('');
+    const CHIPS_S=[{id:"all",l:"الكل"},{id:"manga",l:"مانجا"},{id:"manhwa",l:"مانهوا"},{id:"anime",l:"أنمي"},{id:"completed",l:"مكتمل"},{id:"ongoing",l:"جاري"}];
+  if(ch) ch.innerHTML=CHIPS_S.map(c=>`<button class="chip ${c.id===F?'on':''}" onclick="sf('${c.id}')">${c.l}</button>`).join('');
   let res=visibleTitles();
   if(Q.trim()){const q=Q.toLowerCase();res=res.filter(t=>(t.nameAr||'').toLowerCase().includes(q)||(t.nameEn||'').toLowerCase().includes(q)||(t.genres||[]).some(g=>g.toLowerCase().includes(q)));}
   if(F==='manga')res=res.filter(t=>t.type==='manga');
   if(F==='manhwa')res=res.filter(t=>t.type==='manhwa');
   if(F==='anime')res=res.filter(t=>t.type==='anime');
-  if(F==='completed')res=res.filter(t=>t.status==='مكتمل');
-  if(F==='ongoing')res=res.filter(t=>t.status==='جاري');
+  if(F==='completed')res=res.filter(t=>t.status==='مكتمل'||t.status==='completed');
+  if(F==='ongoing')res=res.filter(t=>t.status==='جاري'||t.status==='ongoing'||t.status==='Ongoing');
   $('s-cnt').textContent=res.length+' نتيجة';
-  $('s-ti').textContent=Q?`نتائج "${Q}"`:CHIPS.find(c=>c.id===F)?.l||'كل العناوين';
+  $('s-ti').textContent=Q?`نتائج "${Q}"`:'كل العناوين';
   const g=$('sg'),e=$('s-emp');
   if(res.length){g.style.display='grid';e.style.display='none';rGrid('sg',res);}
   else{g.style.display='none';e.style.display='block';}
@@ -1569,18 +2015,34 @@ function nq(q){Q=q;if($('si'))$('si').value=q;if(CUR!=='search')go('search');els
 
 /* ═══ DETAIL ══════════════════════════════════════════ */
 let _detId=null;
+window._ch = undefined; // undefined = never loaded, null = loading/cleared, array = loaded
 const genTag = g => `<span class="gt" style="cursor:pointer" onclick="searchByGenre('${g}')">${g}</span>`;
 
 async function showDet(id){
+  // If titles not loaded yet, wait for them
+  if(!TITLES.length){
+    go('detail');
+    const loadingEl = document.createElement('div');
+    loadingEl.style.cssText='display:flex;align-items:center;justify-content:center;height:200px;color:var(--muted)';
+    loadingEl.textContent='جاري التحميل...';
+    const db2=document.querySelector('#pg-detail .db');
+    if(db2) db2.prepend(loadingEl);
+    await window._authReady;
+    if(!TITLES.length) await loadTitles();
+    loadingEl.remove();
+  }
   const t=TITLES.find(x=>x.id===id); if(!t) return;
   _detId=id; PREV=CUR;
+  window._ch=null;
+  pushRoute(`/manga/${id}`); // clear old chapters
   $('d-bg').src=$('d-cov').src=t.coverUrl||'';
-  $('d-tag').textContent=TL(t.type);$('d-nm').textContent=t.nameAr||'—';
+  $('d-tag').textContent=TL(t.type);
+  $('d-nm').textContent=t.nameAr||'—';
   $('d-en').textContent=t.nameEn||'';
   $('d-syn').textContent=t.desc||'—';
   // Desktop sidebar
   $('si-type').textContent=TL(t.type);
-  $('si-stat').textContent=t.status||'—';
+  $('si-stat').textContent=TStatus(t.status);
   $('si-auth').textContent=t.studio||'—';
   if($('si-auth2')) $('si-auth2').textContent=t.studio||'—';
   $('si-yr').textContent=t.year||'—';$('si-ch').textContent=t.chaptersCount||0;
@@ -1588,27 +2050,71 @@ async function showDet(id){
   // Mobile info panel
   if($('m-rat'))  $('m-rat').textContent=t.rating?'★ '+t.rating:'—';
   if($('m-type')) $('m-type').textContent=TL(t.type);
-  if($('m-stat')) $('m-stat').textContent=t.status||'—';
+  if($('m-stat')) $('m-stat').textContent=TStatus(t.status);
   if($('m-auth')) $('m-auth').textContent=t.studio||'—';
   if($('m-studio')) $('m-studio').textContent=t.studio||'—';
   if($('m-yr'))   $('m-yr').textContent=t.year||'—';
   if($('m-ch'))   $('m-ch').textContent=(t.chaptersCount||0)+' '+(t.type==='anime'?'حلقة':'فصل');
   if($('m-gen'))  $('m-gen').innerHTML=(t.genres||[]).map(genTag).join('');
-  rActBtns(id); go('detail');
+  rActBtns(id);
+  loadLikes(id);
+  _cmtTid=id;
+  // Comments form visibility
+  const cf=$('cmt-form'),cl=$('cmt-login-hint');
+  if(window.ME){if(cf)cf.style.display='block';if(cl)cl.style.display='none';}
+  else{if(cf)cf.style.display='none';if(cl)cl.style.display='block';}
+  go('detail');
+  await loadDetChapters(id);
+  rGrid('dt-rel',TITLES.filter(x=>x.id!==id&&x.type===t.type).slice(0,4));
+}
+
+async function loadDetChapters(id){
   $('dt-ch').innerHTML='<div class="empty"><p style="color:var(--muted)">جاري التحميل...</p></div>';
   try {
-    const {collection,getDocs,query,orderBy}=window.$fb;
+    const {collection,getDocs,query,orderBy,doc,updateDoc}=window.$fb;
     const snap=await getDocs(query(collection(window.$db,`titles/${id}/chapters`),orderBy('number')));
     const ch=[]; snap.forEach(d=>ch.push({...d.data(),id:d.id}));
     window._ch=ch;
-    $('dt-ch').innerHTML=ch.length?ch.map((c,i)=>`
-      <div class="cr-row" onclick="openR('${id}',${i})">
-        <div class="cn2">${c.number}</div>
-        <div style="flex:1"><div class="cnm">${c.name||'الفصل '+c.number}</div><div class="cpg">${(c.pages||[]).length} صفحة</div></div>
-        <div class="cpl">▶</div>
-      </div>`).join(''):'<div class="empty"><div class="ei" style="font-size:28px;opacity:.4">□</div><p>لا توجد فصول</p></div>';
-  } catch(e){$('dt-ch').innerHTML='<div class="empty"><p>خطأ في التحميل</p></div>';}
-  rGrid('dt-rel',TITLES.filter(x=>x.id!==id&&x.type===t.type).slice(0,4));
+    // Sync chaptersCount
+    const realCount=ch.length;
+    await updateDoc(doc(window.$db,'titles',id),{chaptersCount:realCount});
+    const t=TITLES.find(x=>x.id===id);
+    if(t){ t.chaptersCount=realCount; }
+    // Update visible counters on detail page
+    if($('si-ch')) $('si-ch').textContent=realCount;
+    if($('m-ch')) $('m-ch').textContent=realCount+' '+(t?.type==='anime'?'حلقة':'فصل');
+    renderChapterList(id, ch);
+  } catch(e){$('dt-ch').innerHTML=`<div class="empty"><p style="color:var(--red);font-size:12px">خطأ: ${e.message}</p></div>`;}
+}
+
+function renderChapterList(id, ch){
+  // Show download bar when chapters exist
+  const dlBar=$('dl-bar');
+  if(dlBar) dlBar.style.display=ch&&ch.length?'flex':'none';
+
+  if(!ch||!ch.length){
+    $('dt-ch').innerHTML='<div class="empty"><div class="ei" style="font-size:28px;opacity:.4">□</div><p>لا توجد فصول</p></div>';
+    return;
+  }
+  $('dt-ch').innerHTML=ch.map((c,idx)=>{
+    const free = idx===0;
+    const locked = !free && !window.ME;
+    const freeLabel = free && !window.ME ? ' · <span style="color:var(--green);font-size:10px">مجاني</span>' : '';
+    const chName = c.name||'الفصل '+c.number;
+    const dlBtn = (!locked && c.pages && c.pages.length) ?
+      `<button onclick="event.stopPropagation();dlChap('${id}',${idx})" title="تحميل" style="padding:4px 7px;border-radius:6px;background:rgba(255,255,255,.06);border:1px solid var(--brd);color:var(--muted);font-size:11px;transition:all .2s" onmouseover="this.style.borderColor='var(--red)';this.style.color='var(--red)'" onmouseout="this.style.borderColor='var(--brd)';this.style.color='var(--muted)'">⬇</button>` : '';
+    return `<div class="cr-row ${locked?'locked-row':''}" onclick="${locked?`showLockMsg()`:`openR('${id}',${idx})`}">
+      <div class="cn2">${c.number}</div>
+      <div style="flex:1">
+        <div class="cnm">${chName}</div>
+        <div class="cpg">${(c.pages||[]).length} صفحة${freeLabel}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:7px">
+        ${dlBtn}
+        <div class="cpl">${locked?'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>':'▶'}</div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function searchByGenre(g){
@@ -1618,12 +2124,6 @@ function searchByGenre(g){
   go('search');
 }
 
-function dtab(btn,tab){
-  btn.closest('.tabs').querySelectorAll('.tb').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
-  const ch=$('dt-ch'),rel=$('dt-rel');
-  if(ch){ch.style.display=tab==='ch'?'flex':'none';if(tab==='ch')ch.style.flexDirection='column';}
-  if(rel)rel.style.display=tab==='rel'?'grid':'none';
-}
 
 /* ═══ NSFW ════════════════════════════════════════════ */
 window.NSFW = localStorage.getItem('nsfw')==='1';
@@ -1633,7 +2133,14 @@ function toggleNSFW(el){
   el.classList.toggle('on',window.NSFW);
   const warn=$('nsfw-warn');
   if(warn) warn.style.display=window.NSFW?'block':'none';
-  toast(window.NSFW?'🔞':'✓',window.NSFW?'تم تفعيل المحتوى 18+':'تم إيقاف المحتوى 18+');
+  toast(window.NSFW?'18+':'✓',window.NSFW?'تم تفعيل المحتوى 18+':'تم إيقاف المحتوى 18+');
+  // Save to Firestore if logged in
+  if(window.ME){
+    try{
+      const {doc:fdoc,updateDoc}=window.$fb;
+      updateDoc(fdoc(window.$db,'users',window.ME.uid),{nsfw:window.NSFW});
+    }catch(e){}
+  }
   loadTitles();
 }
 function initNSFW(){
@@ -1643,7 +2150,37 @@ function initNSFW(){
 
 
 /* ═══ READER ══════════════════════════════════════════ */
-function openR(tid,idx){RTID=tid;RI=idx;RC=window._ch||[];PREV=CUR;go('reader');rReader();}
+function openR(tid,idx){
+  // Lock check: index > 0 requires login
+  if(idx > 0 && !window.ME){
+    showLockMsg();
+    return;
+  }
+  RTID=tid;RI=idx;RC=window._ch||[];PREV=CUR;go('reader');rReader();
+}
+/* ═══ READER MODE ═════════════════════════════════════ */
+let RMODE = localStorage.getItem('rmode')||'scroll'; // 'scroll' or 'page'
+let RPAGE = 0; // current page index in page mode
+let _rtimeInterval = null;
+
+function toggleRMode(){
+  RMODE = RMODE==='scroll'?'page':'scroll';
+  localStorage.setItem('rmode', RMODE);
+  rReader();
+}
+
+function updateRTime(){
+  const el=$('r-time'); if(!el) return;
+  const now=new Date();
+  el.textContent=now.toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'});
+}
+
+function startRTime(){
+  updateRTime();
+  if(_rtimeInterval) clearInterval(_rtimeInterval);
+  _rtimeInterval = setInterval(updateRTime, 30000);
+}
+
 function rReader(){
   if(!RC.length) return;
   const c=RC[RI],t=TITLES.find(x=>x.id===RTID);
@@ -1652,12 +2189,69 @@ function rReader(){
   $('r-cnt').textContent=`${RI+1} / ${RC.length}`;
   $('r-info').textContent=`الفصل ${RI+1} من ${RC.length}`;
   const pgs=c.pages||[];
-  $('r-pgs').innerHTML=pgs.length?pgs.map((u,i)=>`<img class="pimg" src="${u}" alt="صفحة ${i+1}" loading="lazy" onerror="this.style.display='none'">`).join(''):'<div class="empty"><div class="ei">📭</div><p>لا توجد صفحات</p></div>';
+  RPAGE=0;
+
+  // Update mode button
+  const mb=$('rmode-btn');
+  if(mb) mb.textContent = RMODE==='scroll'?'صفحة بصفحة':'تمرير';
+
+  // Start clock
+  startRTime();
+
+  if(RMODE==='page'){
+    // Page-by-page mode
+    const pw=$('r-pgs');
+    pw.className='pw paged';
+    if(!pgs.length){pw.innerHTML='<div class="empty"><p>لا توجد صفحات</p></div>';return;}
+    pw.innerHTML = pgs.map((u,i)=>`<img class="pimg${i>0?' hidden':''}" src="${u}" alt="صفحة ${i+1}" draggable="false" onerror="this.classList.add('hidden');rPageNav(1)">`).join('')
+      + `<div class="swipe-zone left" onclick="rPageNav(1)"></div>`
+      + `<div class="swipe-zone right" onclick="rPageNav(-1)"></div>`;
+    updatePageNo(pgs.length);
+    // Touch swipe
+    let tx=0;
+    pw.addEventListener('touchstart',e=>{tx=e.touches[0].clientX},{passive:true});
+    pw.addEventListener('touchend',e=>{
+      const dx=tx-e.changedTouches[0].clientX;
+      if(Math.abs(dx)>50) rPageNav(dx>0?1:-1);
+    },{passive:true});
+  } else {
+    // Scroll mode
+    const pw=$('r-pgs');
+    pw.className='pw';
+    pw.innerHTML=pgs.length?pgs.map((u,i)=>`<img class="pimg" src="${u}" alt="صفحة ${i+1}" loading="lazy" onerror="this.style.display='none'">`).join(''):'<div class="empty"><div class="ei" style="font-size:28px;opacity:.3">—</div><p>لا توجد صفحات</p></div>';
+    updatePageNo(pgs.length);
+  }
+
   if(window.ME&&window.MY_LIST[RTID]){window.MY_LIST[RTID].progress=RI+1;persist();}
 }
+
+function updatePageNo(total){
+  const el=$('r-pageno'); if(!el) return;
+  el.textContent = RMODE==='page'?`${RPAGE+1} / ${total}`:`${RC[RI]?.pages?.length||0} ${'صفحة'}`;
+}
+
+function rPageNav(dir){
+  const pgs=RC[RI]?.pages||[];
+  const imgs=$('r-pgs')?.querySelectorAll('.pimg');
+  if(!imgs||!imgs.length) return;
+  const newP=RPAGE+dir;
+  if(newP<0){rnav(-1);return;}
+  if(newP>=pgs.length){rnav(1);return;}
+  imgs[RPAGE].classList.add('hidden');
+  RPAGE=newP;
+  imgs[RPAGE].classList.remove('hidden');
+  updatePageNo(pgs.length);
+}
+
 function rnav(d){
   const n=RI+d;
-  if(n<0||n>=RC.length){toast(d>0?'🎉':'⚠️',d>0?'وصلت لآخر فصل!':'هذا أول فصل');return;}
+  if(n<0||n>=RC.length){toast(d>0?'✓':'!',d>0?'آخر فصل':'أول فصل');return;}
+  // Lock check for non-first chapters
+  if(n > 0 && !window.ME){
+    go(PREV||'detail');
+    showLockMsg();
+    return;
+  }
   RI=n;rReader();const pw=$('r-pgs');if(pw)pw.parentElement.scrollTo({top:0});window.scrollTo({top:0});
 }
 
@@ -1665,10 +2259,10 @@ function rnav(d){
 function rActBtns(id){
   const e=window.MY_LIST[id];
   const BTNS=[
-    {s:'watching',ico:'▶',lbl:'أضف للمتابعة',main:true},
-    {s:'plan',ico:'＋',lbl:'ناوي أشوف',main:false},
-    {s:'fav',ico:'♡',lbl:'المفضلة',main:false},
-    {s:'done',ico:'✓',lbl:'أتممت',main:false},
+    {s:'watching',ico:'▶',get lbl(){return 'أضف للمتابعة'},main:true},
+    {s:'plan',ico:'＋',get lbl(){return 'ناوي أشوف'},main:false},
+    {s:'fav',ico:'♡',get lbl(){return 'المفضلة'},main:false},
+    {s:'done',ico:'✓',get lbl(){return 'أتممت'},main:false},
   ];
   const html=BTNS.map(b=>{
     const act=e?.status===b.s;
@@ -1683,11 +2277,11 @@ function rActBtns(id){
 }
 async function toggleL(id,status){
   const t=TITLES.find(x=>x.id===id); if(!t) return;
-  if(window.MY_LIST[id]?.status===status){delete window.MY_LIST[id];await syncI(id,null);toast('🗑️','تم الحذف');}
+  if(window.MY_LIST[id]?.status===status){delete window.MY_LIST[id];await syncI(id,null);toast('↑','تم الحذف');}
   else{
     const d={status,title:t.nameAr,img:t.coverUrl||'',type:t.type,eps:t.chaptersCount||0,progress:window.MY_LIST[id]?.progress||0};
     window.MY_LIST[id]=d;await syncI(id,d);
-    toast('✓',{watching:'أُضيف للمتابعة ✓',plan:'أُضيف للناوي ✓',fav:'أُضيف للمفضلة ❤️',done:'مكتمل ✓'}[status]);
+    toast('✓',{watching:'أُضيف للمتابعة ✓',plan:'أُضيف للناوي ✓',fav:'أُضيف للمفضلة',done:'مكتمل ✓'}[status]);
   }
   persist();rActBtns(id);
 }
@@ -1700,18 +2294,18 @@ function rMyList(tab){
   MLT=tab;
   const items=Object.entries(window.MY_LIST).filter(([,v])=>v.status===tab).map(([id,v])=>({id,...v}));
   const el=$('ml-body'); if(!el) return;
-  if(!items.length){el.innerHTML=`<div class="empty"><div class="ei">📭</div><p>القائمة فاضية!</p><br><button class="btn-r" onclick="go('search')" style="margin-top:12px">استكشف</button></div>`;return;}
+  if(!items.length){el.innerHTML=`<div class="empty"><div class="ei"></div><p>${'القائمة فارغة'}</p><br><button class="btn-r" onclick="go('search')" style="margin-top:12px">${'استكشف'}</button></div>`;return;}
   el.innerHTML=items.map(item=>{
     const pct=Math.min(100,Math.round((item.progress/(item.eps||1))*100));
     return `<div class="mi" onclick="showDet('${item.id}')">
-      <div class="mt2"><img src="${item.img}" onerror="this.parentElement.innerHTML='🎌'"></div>
+      <div class="mt2"><img src="${item.img}" onerror="this.parentElement.innerHTML='?'"></div>
       <div style="flex:1;min-width:0"><div class="mnm">${item.title}</div><div class="mpr">الفصل ${item.progress||0} من ${item.eps||'?'}</div><div class="mpb"><div class="mpf" style="width:${pct}%"></div></div></div>
-      <button class="mdl" onclick="event.stopPropagation();delI('${item.id}')">🗑️</button>
+      <button class="mdl" onclick="event.stopPropagation();delI('${item.id}')"><svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><polyline points='3 6 5 6 21 6'/><path d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/><path d='M10 11v6M14 11v6'/><path d='M9 6V4h6v2'/></svg></button>
     </div>`;
   }).join('');
 }
 function mltab(btn,tab){btn.closest('.tabs').querySelectorAll('.tb').forEach(b=>b.classList.remove('on'));btn.classList.add('on');rMyList(tab);}
-async function delI(id){delete window.MY_LIST[id];persist();await syncI(id,null);rMyList(MLT);toast('🗑️','تم الحذف');}
+async function delI(id){delete window.MY_LIST[id];persist();await syncI(id,null);rMyList(MLT);toast('↑','تم الحذف');}
 
 /* ═══ SETTINGS ════════════════════════════════════════ */
 function openSettings(){
@@ -1728,26 +2322,26 @@ function openSettings(){
   go('settings');
 }
 function updThemeUI(dark){
-  const sw=$('theme-sw');if(sw)sw.classList.toggle('on',dark);
-  const td=$('th-dark'),tl=$('th-light');
-  if(td)td.classList.toggle('on',dark);
-  if(tl)tl.classList.toggle('on',!dark);
+  const t=document.documentElement.getAttribute('data-theme');
+  const sw=$('theme-sw');if(sw)sw.classList.toggle('on',t!=='light');
+  ['th-dark','th-amoled','th-light'].forEach(id=>{const el=$(id);if(el)el.classList.remove('on');});
+  const cur=$(t==='dark'?'th-dark':t==='amoled'?'th-amoled':'th-light');
+  if(cur)cur.classList.add('on');
 }
 function setTheme(t){
   document.documentElement.setAttribute('data-theme',t);
   localStorage.setItem('theme',t);
-  const tb=$('tbtn');
-  if(tb) tb.innerHTML=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${t==='dark'?'<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>':'<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>'}</svg> ${t==='dark'?'الوضع الداكن':'الوضع الفاتح'}`;
   updThemeUI(t==='dark');
-  toast(t==='dark'?'◐':'○',t==='dark'?'الوضع الداكن':'الوضع الفاتح');
+  const label={'dark':'الوضع الداكن','amoled':'الوضع الأسود','light':'الوضع الفاتح'}[t]||t;
+  toast('◐',label);
 }
 function toggleTheme(){
-  const dark=document.documentElement.getAttribute('data-theme')==='dark';
-  setTheme(dark?'light':'dark');
+  const t=document.documentElement.getAttribute('data-theme');
+  setTheme(t==='dark'?'light':t==='light'?'amoled':'dark');
 }
 async function saveName(){
   const nm=$('set-nm').value.trim();
-  if(!nm){toast('❌','ادخل اسماً صالحاً');return;}
+  if(!nm){toast('✕','ادخل اسماً صالحاً');return;}
   if(!window.ME) return;
   try{
     const {updateProfile,doc,updateDoc}=window.$fb;
@@ -1755,8 +2349,8 @@ async function saveName(){
     await updateDoc(doc(window.$db,'users',window.ME.uid),{name:nm});
     $('sb-nm').textContent=nm;$('sb-av').textContent=nm[0].toUpperCase();
     $('set-av-txt').textContent=nm[0].toUpperCase();
-    toast('✅','تم حفظ الاسم!');
-  }catch(e){toast('❌','خطأ: '+e.message);}
+    toast('✓','تم حفظ الاسم!');
+  }catch(e){toast('✕','خطأ: '+e.message);}
 }
 async function changePW(){
   const cur=$('pw-cur').value,nw=$('pw-new').value,con=$('pw-con').value;
@@ -1769,23 +2363,31 @@ async function changePW(){
     await reauthenticateWithCredential(window.ME,cred);
     await updatePassword(window.ME,nw);
     $('pw-cur').value='';$('pw-new').value='';$('pw-con').value='';
-    toast('✅','تم تغيير كلمة المرور!');
+    toast('✓','تم تغيير كلمة المرور!');
   }catch(e){serr('pw-err',aerr(e.code));}
 }
 async function changeAvatar(inp){
   if(!inp.files[0]||!window.ME) return;
   toast('⏳','جاري رفع الصورة...');
   try{
-    $('cpw').style.display='block';
-    const url=await uploadC(inp.files[0],'avatar_'+window.ME.uid,'avpw','avpf','avpt');
+    // Upload directly to Cloudinary without progress bar
+    const file=inp.files[0];
+    const fd=new FormData();
+    fd.append('file',file);
+    fd.append('upload_preset','fnnukmsu');
+    fd.append('public_id','avatar_'+window.ME.uid);
+    const r=await fetch('https://api.cloudinary.com/v1_1/djv9uolbx/image/upload',{method:'POST',body:fd});
+    const data=await r.json();
+    if(!data.secure_url) throw new Error('Upload failed');
+    const url=data.secure_url;
     const {updateProfile,doc,updateDoc}=window.$fb;
     await updateProfile(window.ME,{photoURL:url});
     await updateDoc(doc(window.$db,'users',window.ME.uid),{photoURL:url});
     $('set-av-img').src=url;$('set-av-img').style.display='block';$('set-av-txt').style.display='none';
-    $('sb-av').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
-    $('mob-av').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
-    toast('✅','تم تغيير الصورة!');
-  }catch(e){toast('❌','خطأ: '+e.message);}
+    const sbav=$('sb-av'); if(sbav) sbav.innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    const mobav=$('mob-av'); if(mobav) mobav.innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    toast('✓','تم تغيير الصورة!');
+  }catch(e){toast('✕','خطأ: '+e.message);}
 }
 async function removeAvatar(){
   if(!window.ME) return;
@@ -1798,13 +2400,13 @@ async function removeAvatar(){
     $('set-av-txt').textContent=nm[0].toUpperCase();
     $('sb-av').textContent=nm[0].toUpperCase();
     $('mob-av').textContent=nm[0].toUpperCase();
-    toast('✅','تم حذف الصورة');
-  }catch(e){toast('❌','خطأ: '+e.message);}
+    toast('✓','تم حذف الصورة');
+  }catch(e){toast('✕','خطأ: '+e.message);}
 }
 function togNotif(el,key){
   const notifs=JSON.parse(localStorage.getItem('notifs')||'{}');
-  if(notifs[key]){delete notifs[key];el.classList.remove('on');toast('🔕','تم إيقاف الإشعار');}
-  else{notifs[key]=true;activSw(el);toast('🔔','تم تفعيل الإشعار');}
+  if(notifs[key]){delete notifs[key];el.classList.remove('on');toast('!','تم إيقاف الإشعار');}
+  else{notifs[key]=true;activSw(el);toast('!','تم تفعيل الإشعار');}
   localStorage.setItem('notifs',JSON.stringify(notifs));
 }
 function activSw(el){el.classList.add('on');}
@@ -1816,7 +2418,7 @@ function clearAllList(){
     getDocs(collection(window.$db,`users/${window.ME.uid}/list`))
       .then(snap=>snap.forEach(d=>deleteDoc(doc(window.$db,`users/${window.ME.uid}/list`,d.id)))).catch(()=>{});
   }
-  toast('🗑️','تم مسح كل القوائم');
+  toast('↑','تم مسح كل القوائم');
 }
 async function deleteAcc(){
   if(!window.ME) return;
@@ -1830,8 +2432,8 @@ async function deleteAcc(){
     await deleteDoc(doc(window.$db,'users',window.ME.uid));
     await deleteUser(window.ME);
     window.MY_LIST={};persist();onLogout();go('home');
-    toast('👋','تم حذف الحساب');
-  }catch(e){toast('❌',aerr(e.code));}
+    toast('✓','تم حذف الحساب');
+  }catch(e){toast('✕',aerr(e.code));}
 }
 
 /* ═══ ADMIN ═══════════════════════════════════════════ */
@@ -1846,6 +2448,173 @@ function atab(btn,id){
   if(id==='users')loadUsers();
   if(id==='titles')rTitles();
 }
+async /* ═══ CHAPTER EDIT ════════════════════════════════════ */
+let _ceditTid=null, _ceditCid=null, _ceditPages=[], _ceditNewFiles=[], _ceditNewUrls=[], _ceditMT='img', _ceditPDFF=null, _ceditZIPF=null;
+
+function openChapEdit(tid, cid, num, name, pgCount, existingPages){
+  _ceditTid=tid; _ceditCid=cid; _ceditNewFiles=[]; _ceditNewUrls=[]; _ceditPDFF=null; _ceditZIPF=null;
+  $('chedit-title').textContent=`تعديل الفصل ${num}`;
+  $('chedit-name').value=name||`الفصل ${num}`;
+  $('cedit-url-inp').value='';
+  $('cedit-new-preview').style.display='none';
+  $('cedit-pw').style.display='none';
+  $('chedit-pgcount').textContent=`${pgCount} صفحة`;
+  $('cedit-pdf-info').textContent='';$('cedit-zip-info').textContent='';
+  setCEditMT('img');
+  if(existingPages && existingPages.length){
+    _ceditPages=[...existingPages];
+    renderChapEditPages();
+  } else {
+    loadChapPages(tid,cid);
+  }
+  $('chedit-m').classList.add('open');
+}
+
+async function loadChapPages(tid,cid){
+  const {doc,getDoc}=window.$fb;
+  $('chedit-pglist').innerHTML='<div style="color:var(--muted);font-size:12px;padding:8px">جاري التحميل...</div>';
+  try{
+    const d=await getDoc(doc(window.$db,`titles/${tid}/chapters`,cid));
+    _ceditPages=d.exists()?(d.data().pages||[]):[];
+    renderChapEditPages();
+  }catch(e){$('chedit-pglist').innerHTML=`<div style="color:var(--red);font-size:11px">${e.message}</div>`;}
+}
+
+function renderChapEditPages(){
+  const n=_ceditPages.length;
+  $('chedit-pgcount').textContent=`${n} صفحة`;
+  if(!n){$('chedit-pglist').innerHTML='<div style="color:var(--muted);font-size:12px;padding:8px;text-align:center">لا توجد صفحات</div>';return;}
+  $('chedit-pglist').innerHTML=_ceditPages.map((url,i)=>`
+    <div style="position:relative;aspect-ratio:3/4">
+      <img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:5px" loading="lazy">
+      <button onclick="removeCEditPage(${i})" style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:rgba(230,57,70,.9);border:none;color:#fff;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1">✕</button>
+      <div style="position:absolute;bottom:2px;right:3px;background:rgba(0,0,0,.7);color:#fff;font-size:9px;padding:1px 4px;border-radius:3px">${i+1}</div>
+    </div>`).join('');
+}
+
+function removeCEditPage(i){
+  _ceditPages.splice(i,1);
+  renderChapEditPages();
+}
+
+function setCEditMT(m){
+  _ceditMT=m;
+  ['img','pdf','zip','url'].forEach(t=>{
+    $(`cedit-t-${t}`)?.classList.toggle('on',t===m);
+    $(`cedit-${t}`)&&($(`cedit-${t}`).style.display=t===m?'block':'none');
+  });
+}
+
+function setCEditPages(files){
+  _ceditNewFiles=Array.from(files);
+  showCEditNewPreview(_ceditNewFiles.map(f=>URL.createObjectURL(f)));
+}
+
+function setCEditPDF(f){
+  if(!f)return;
+  _ceditPDFF=f;
+  $('cedit-pdf-info').textContent=`📄 ${f.name} · ${(f.size/1024/1024).toFixed(2)} MB`;
+}
+
+function setCEditZIP(f){
+  if(!f)return;
+  _ceditZIPF=f;
+  $('cedit-zip-info').textContent=`🗜 ${f.name} · ${(f.size/1024/1024).toFixed(2)} MB`;
+}
+
+function showCEditNewPreview(urls){
+  if(!urls.length){$('cedit-new-preview').style.display='none';return;}
+  $('cedit-new-preview').style.display='block';
+  $('cedit-new-count').textContent=urls.length;
+  $('cedit-new-thumbs').innerHTML=urls.map(u=>`<img src="${u}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:5px">`).join('');
+}
+
+async function saveChapEdit(){
+  const btn=$('chedit-save');
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري...';
+  $('cedit-pw').style.display='none';
+  try{
+    let newUrls=[];
+    // Upload new pages based on method
+    if(_ceditMT==='img'&&_ceditNewFiles.length){
+      const tot=_ceditNewFiles.length;
+      $('cedit-pw').style.display='block';
+      for(let i=0;i<tot;i++){
+        $('cedit-pt').textContent=`صفحة ${i+1} من ${tot}`;
+        newUrls.push(await uploadC(_ceditNewFiles[i],`ch_edit_${_ceditCid}_p${_ceditPages.length+i+1}_${Date.now()}`,'cedit-pw','cedit-pf','cedit-pt'));
+      }
+    } else if(_ceditMT==='pdf'&&_ceditPDFF){
+      toast('⏳','جاري تحويل PDF...');
+      const pages=await extractPDFPages(_ceditPDFF);
+      const tot=pages.length;
+      $('cedit-pw').style.display='block';
+      for(let i=0;i<tot;i++){
+        $('cedit-pt').textContent=`صفحة ${i+1} من ${tot}`;
+        newUrls.push(await uploadC(pages[i],`ch_edit_${_ceditCid}_p${_ceditPages.length+i+1}_${Date.now()}`,'cedit-pw','cedit-pf','cedit-pt'));
+      }
+    } else if(_ceditMT==='zip'&&_ceditZIPF){
+      toast('⏳','جاري استخراج ZIP...');
+      const pages=await extractZIPImages(_ceditZIPF);
+      const tot=pages.length;
+      $('cedit-pw').style.display='block';
+      for(let i=0;i<tot;i++){
+        $('cedit-pt').textContent=`صفحة ${i+1} من ${tot}`;
+        newUrls.push(await uploadC(pages[i],`ch_edit_${_ceditCid}_p${_ceditPages.length+i+1}_${Date.now()}`,'cedit-pw','cedit-pf','cedit-pt'));
+      }
+    } else if(_ceditMT==='url'){
+      const raw=$('cedit-url-inp').value.trim();
+      newUrls=raw.split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'));
+    }
+
+    // Merge: existing (possibly with deletions) + new
+    const finalPages=[..._ceditPages,...newUrls];
+    const newName=$('chedit-name').value.trim();
+
+    const {doc,updateDoc}=window.$fb;
+    await updateDoc(doc(window.$db,`titles/${_ceditTid}/chapters`,_ceditCid),{
+      pages:finalPages,
+      name:newName
+    });
+
+    toast('✓',`تم الحفظ! ${finalPages.length} صفحة`);
+    closeChapEdit();
+    await loadChaps(_ceditTid);
+  }catch(e){toast('✕','خطأ: '+e.message);console.error(e);}
+  finally{btn.disabled=false;btn.innerHTML='💾 حفظ التعديلات';}
+}
+
+function closeChapEdit(){
+  $('chedit-m').classList.remove('open');
+  _ceditTid=null;_ceditCid=null;_ceditNewFiles=[];_ceditPDFF=null;_ceditZIPF=null;
+  $('cedit-new-preview').style.display='none';
+  $('cedit-pw').style.display='none';
+}
+
+async function fixAllChapterCounts(){
+  const btn=$('fix-cnt-btn');
+  const res=$('fix-cnt-res');
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري...';
+  res.textContent='';
+  const {collection,getDocs,doc,updateDoc}=window.$fb;
+  try{
+    let fixed=0;
+    for(const t of TITLES){
+      const snap=await getDocs(collection(window.$db,`titles/${t.id}/chapters`));
+      const realCount=snap.size;
+      if(t.chaptersCount!==realCount){
+        await updateDoc(doc(window.$db,'titles',t.id),{chaptersCount:realCount});
+        t.chaptersCount=realCount;
+        fixed++;
+      }
+    }
+    rTitles();
+    res.textContent=`✓ تم إصلاح ${fixed} عنوان`;
+    res.style.color='var(--green)';
+    toast('✓',`تم إصلاح ${fixed} عنوان`);
+  }catch(e){res.textContent='خطأ: '+e.message;res.style.color='var(--red)';}
+  finally{btn.disabled=false;btn.innerHTML='🔄 إصلاح عدادات الفصول';}
+}
+
 function rAdDash(){
   $('ad-rec').innerHTML=[...TITLES].reverse().slice(0,5).map(t=>`
     <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
@@ -1856,17 +2625,18 @@ function rAdDash(){
 }
 function rTitles(){
   const tb=$('ttb'); if(!tb) return;
-  if(!TITLES.length){tb.innerHTML='<tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">لا توجد عناوين</td></tr>';return;}
+  if(!TITLES.length){tb.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">${'لا توجد عناوين'}</td></tr>`;return;}
+  
   tb.innerHTML=TITLES.map(t=>`
     <tr>
       <td><img src="${t.coverUrl||''}" class="tc" onerror="this.style.display='none'"></td>
       <td><div style="font-weight:700">${t.nameAr}</div><div style="font-size:11px;color:var(--muted)">${t.nameEn||''}</div></td>
       <td><span class="tbg ${TAC(t.type)}">${TL(t.type)}</span></td>
       <td style="color:var(--muted);font-size:12px">${t.chaptersCount||0}</td>
-      <td style="font-size:12px;color:${t.status==='جاري'?'var(--green)':'var(--muted)'}">${t.status||'—'}</td>
+      <td style="font-size:12px;color:${t.status==='جاري'||t.status==='ongoing'?'var(--green)':'var(--muted)'}">${TStatus(t.status)||'—'}</td>
       <td style="display:flex;gap:5px;flex-wrap:wrap">
-        <button class="ba2 bag sm" onclick="editT('${t.id}')">✏️</button>
-        <button class="ba2 bad sm" onclick="askDel('title','${t.id}','${t.nameAr}')">🗑️</button>
+        <button class="ba2 bag sm" onclick="editT('${t.id}')"><svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'/><path d='M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'/></svg></button>
+        <button class="ba2 bad sm" onclick="askDel('title','${t.id}','${t.nameAr}')"><svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><polyline points='3 6 5 6 21 6'/><path d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/><path d='M10 11v6M14 11v6'/><path d='M9 6V4h6v2'/></svg></button>
       </td>
     </tr>`).join('');
 }
@@ -1882,12 +2652,13 @@ async function selT(id){
 }
 async function saveTitle(){
   const ar=$('t-ar').value.trim(),desc=$('t-desc').value.trim();
-  if(!ar||!desc){toast('❌','يرجى ملء الاسم والوصف');return;}
+  if(!ar||!desc){toast('✕','يرجى ملء الاسم والوصف');return;}
   const btn=$('stb');btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري...';
   try{
     const {collection,addDoc,doc,updateDoc,serverTimestamp}=window.$fb;
     let cu=$('eid').dataset.cover||'';
-    if(COVF)cu=await uploadC(COVF,'cover_'+Date.now(),'cpw','cpf','cpt');
+    if(COVF) cu=await uploadC(COVF,'cover_'+Date.now(),'cpw','cpf','cpt');
+    else if(window._importCoverUrl) cu=window._importCoverUrl;
     const nsfw=$('t-nsfw')?$('t-nsfw').checked:false;
     let genres=$('t-gen').value.split('،').map(g=>g.trim()).filter(Boolean);
     if(nsfw && !genres.includes('18+')) genres.unshift('18+');
@@ -1896,10 +2667,39 @@ async function saveTitle(){
                 studio:$('t-auth').value.trim(),year:parseInt($('t-yr').value)||new Date().getFullYear(),
                 genres,desc,rating:parseFloat($('t-rat').value)||null,nsfw,coverUrl:cu,updatedAt:serverTimestamp()};
     const eid=$('eid').value;
-    if(eid){await updateDoc(doc(window.$db,'titles',eid),data);toast('✅','تم التحديث!');}
-    else{data.chaptersCount=0;data.createdAt=serverTimestamp();await addDoc(collection(window.$db,'titles'),data);toast('✅','تم الإضافة!');}
+    if(eid){
+      await updateDoc(doc(window.$db,'titles',eid),data);
+      toast('✓','تم التحديث!');
+    } else {
+      // Add title
+      const importChaps = window._importChaps||[];
+      data.chaptersCount=importChaps.length;
+      data.createdAt=serverTimestamp();
+      const ref=await addDoc(collection(window.$db,'titles'),data);
+      const tid=ref.id;
+      // Save imported chapters (without pages — pages added via CBZ/URL later)
+      if(importChaps.length){
+        const base=window._importBase||'';
+        for(const ch of importChaps){
+          await addDoc(collection(window.$db,`titles/${tid}/chapters`),{
+            number:ch.number,
+            name:ch.name||`الفصل ${ch.number}`,
+            pages:[],
+            sourceUrl: ch.url?(base+ch.url):'',
+            cbzFile: ch.file||'',
+            createdAt:serverTimestamp()
+          });
+        }
+        toast('✓',`تم إضافة "${ar}" مع ${importChaps.length} فصل ✓`);
+      } else {
+        toast('✓','تم الإضافة!');
+      }
+    }
+    // Clear import state
+    window._importCoverUrl=null;window._importChaps=null;window._importBase=null;
+    $('ktsu-json').value='';$('ktsu-res').textContent='';
     resetTF();await loadTitles();atab(null,'titles');
-  }catch(e){toast('❌','خطأ: '+e.message);}
+  }catch(e){toast('✕','خطأ: '+e.message);console.error(e);}
   finally{btn.disabled=false;btn.innerHTML='حفظ';}
 }
 function editT(id){
@@ -1916,6 +2716,72 @@ function editT(id){
   if(t.coverUrl)$('cprev').innerHTML=`<img src="${t.coverUrl}" style="max-height:110px;border-radius:7px;margin-bottom:5px">`;
   atab(null,'add');window.scrollTo({top:0,behavior:'smooth'});
 }
+/* ═══ KOTATSU IMPORT ══════════════════════════════════ */
+async function importKotatsu(){
+  const raw = $('ktsu-json').value.trim();
+  const res = $('ktsu-res');
+  if(!raw){res.textContent='الصق JSON أولاً';res.style.color='var(--red)';return;}
+  let obj;
+  try{ obj=JSON.parse(raw); }
+  catch(e){res.textContent='JSON غير صحيح';res.style.color='var(--red)';return;}
+
+  res.textContent='⏳ جاري الاستيراد...';res.style.color='var(--muted)';
+
+  // ── Fill title fields ──
+  $('t-ar').value = obj.title||'';
+  $('t-en').value = obj.title_alt||obj.title||'';
+  $('t-desc').value = obj.description||'';
+  $('t-auth').value = (obj.authors||[]).join('، ')||'';
+  $('t-rat').value = obj.rating?Math.round(obj.rating*10*10)/10:'';
+  $('t-nsfw').checked = !!obj.nsfw;
+
+  // State
+  const stateMap={'ONGOING':'جاري','FINISHED':'مكتمل','PAUSED':'متوقف','ABANDONED':'متوقف'};
+  const stat=$('t-stat');
+  const mappedStat=stateMap[obj.state]||'جاري';
+  for(const o of stat.options) if(o.value===mappedStat){stat.value=mappedStat;break;}
+
+  // Tags
+  const tags=(obj.tags||[]).map(t=>t.title).filter(Boolean);
+  $('t-gen').value=tags.join('، ');
+
+  // Source type guess
+  const src=(obj.source||'').toLowerCase();
+  const typeMap={'manhwa':'manhwa','manhua':'manhua','anime':'anime'};
+  let guessedType='manga';
+  for(const [k,v] of Object.entries(typeMap)){if(src.includes(k)||tags.some(t=>t.includes(k))){guessedType=v;break;}}
+  $('t-type').value=guessedType;
+
+  // Chapters count
+  const chaps=obj.chapters?Object.values(obj.chapters):[];
+  $('t-yr').value='';
+
+  // ── Cover ──
+  if(obj.cover){
+    // Show cover preview
+    const cprev=$('cprev');
+    cprev.innerHTML=`<img src="${obj.cover}" style="width:100%;height:100%;object-fit:cover;border-radius:8px" onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;color:var(--muted);font-size:11px\\'>تعذر تحميل الغلاف</div>'">`;
+    // Store cover URL for saving
+    window._importCoverUrl = obj.cover;
+    COVF = null; // no file, we'll use URL directly
+  }
+
+  // ── Store chapters for later upload ──
+  window._importChaps = chaps.sort((a,b)=>a.number-b.number);
+
+  // ── Source base URL ──
+  window._importBase = obj.public_url ? new URL(obj.public_url).origin : '';
+
+  const chapCount=chaps.length;
+  res.textContent=`✓ جاهز — ${chapCount} فصل · اضغط "حفظ" لإضافة العنوان`;
+  res.style.color='var(--green)';
+
+  // Show chapter count hint
+  if($('t-ar').value) $('add-h').textContent=`إضافة: ${$('t-ar').value}`;
+
+  toast('✓',`تم استيراد "${obj.title}" — ${chapCount} فصل`);
+}
+
 function resetTF(){
   COVF=null;$('eid').value='';$('eid').dataset.cover='';
   ['t-ar','t-en','t-auth','t-yr','t-gen','t-desc','t-rat'].forEach(i=>$(i).value='');
@@ -1927,8 +2793,8 @@ function resetTF(){
 }
 async function saveChap(){
   const tid=$('csel').value,num=parseFloat($('ch-n').value);
-  if(!tid||!num){toast('❌','اختر عنواناً ورقم الفصل');return;}
-  if(!SPGS.length){toast('❌','اختر صور الصفحات');return;}
+  if(!tid||!num){toast('✕','اختر عنواناً ورقم الفصل');return;}
+  if(!SPGS.length){toast('✕','اختر صور الصفحات');return;}
   const btn=$('schb');btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري الرفع...';
   try{
     const urls=[],tot=SPGS.length;
@@ -1940,18 +2806,40 @@ async function saveChap(){
     await addDoc(collection(window.$db,`titles/${tid}/chapters`),{number:num,name:$('ch-nm2').value.trim()||`الفصل ${num}`,pages:urls,createdAt:serverTimestamp()});
     const t=TITLES.find(x=>x.id===tid);
     if(t){await updateDoc(doc(window.$db,'titles',tid),{chaptersCount:(t.chaptersCount||0)+1});t.chaptersCount=(t.chaptersCount||0)+1;}
-    toast('✅',`تم رفع الفصل ${num}! (${urls.length} صفحة)`);
+    toast('✓',`تم رفع الفصل ${num}! (${urls.length} صفحة)`);
     $('ch-n').value='';$('ch-nm2').value='';
     clearPages();
     $('ppw').style.display='none';
     await loadChaps(tid);
-  }catch(e){toast('❌','خطأ: '+e.message);}
-  finally{btn.disabled=false;btn.innerHTML='📤 رفع الفصل';}
+  }catch(e){toast('✕','خطأ: '+e.message);}
+  finally{btn.disabled=false;btn.innerHTML='رفع الفصل';}
 }
 async function mkAdm(uid){
+  if(!window.IS_ADMIN){toast('✕','ليس لديك صلاحية');return;}
   const {doc,updateDoc}=window.$fb;
-  try{await updateDoc(doc(window.$db,'users',uid),{role:'admin'});toast('✅','تم منح الصلاحية');loadUsers();}
-  catch(e){toast('❌',e.message);}
+  try{
+    await updateDoc(doc(window.$db,'users',uid),{role:'admin'});
+    toast('✓','تم منح الصلاحية ✓');
+    loadUsers();
+  }catch(e){
+    toast('✕','خطأ في الصلاحيات — تأكد من تحديث Firestore Rules');
+    console.error('mkAdm error:',e);
+  }
+}
+
+async function rmAdm(uid, name){
+  if(!window.IS_ADMIN){toast('✕','ليس لديك صلاحية');return;}
+  if(uid === window.ME?.uid){toast('!','لا يمكنك إزالة صلاحيتك');return;}
+  const confirm = window.confirm(`إزالة صلاحية الأدمن من "${name}"؟`);
+  if(!confirm) return;
+  const {doc,updateDoc}=window.$fb;
+  try{
+    await updateDoc(doc(window.$db,'users',uid),{role:'user'});
+    toast('✓','تم إزالة الصلاحية');
+    loadUsers();
+  }catch(e){
+    toast('✕','خطأ: '+e.message);
+  }
 }
 
 /* ═══ DELETE ══════════════════════════════════════════ */
@@ -1970,13 +2858,13 @@ async function execDel(){
       const cs=await getDocs(collection(window.$db,`titles/${DELT.id}/chapters`));
       for(const d of cs.docs)await deleteDoc(doc(window.$db,`titles/${DELT.id}/chapters`,d.id));
       await deleteDoc(doc(window.$db,'titles',DELT.id));
-      toast('🗑️','تم الحذف');await loadTitles();
+      toast('↑','تم الحذف');await loadTitles();
     }else if(DELT.type==='chap'){
       const [tid,cid]=DELT.id.split('/');
       await deleteDoc(doc(window.$db,`titles/${tid}/chapters`,cid));
-      toast('🗑️','تم الحذف');await loadChaps(tid);
+      toast('↑','تم الحذف');await loadChaps(tid);
     }
-  }catch(e){toast('❌',e.message);}
+  }catch(e){toast('✕',e.message);}
   $('conf-m').classList.remove('open');$('conf-ok').innerHTML='حذف';DELT=null;
 }
 
@@ -2004,13 +2892,13 @@ function prevc(inp){
 function prevp(files){
   SPGS = Array.from(files);
   renderPagePreviews();
-  toast('📄',`تم اختيار ${SPGS.length} صفحة`);
+  toast('↑',`تم اختيار ${SPGS.length} صفحة`);
 }
 function addMorePages(files){
   const newFiles = Array.from(files);
   SPGS = [...SPGS, ...newFiles];
   renderPagePreviews();
-  toast('➕',`أُضيف ${newFiles.length} صفحة — الإجمالي: ${SPGS.length}`);
+  toast('+',`أُضيف ${newFiles.length} صفحة — الإجمالي: ${SPGS.length}`);
 }
 function clearPages(){
   SPGS=[];
@@ -2019,7 +2907,7 @@ function clearPages(){
   $('pg-counter').style.display='none';
   $('pz-inner').innerHTML='<div class="uz-i" style="font-size:28px;color:var(--muted)">↑</div><div class="uz-t">اسحب الصفحات أو اضغط للاختيار</div><div class="uz-s">يمكنك اختيار أكثر من صورة دفعة واحدة · بالترتيب</div>';
   $('pi').value='';
-  toast('🗑️','تم مسح الصفحات');
+  toast('↑','تم مسح الصفحات');
 }
 function renderPagePreviews(){
   const bar=$('pg-bar'),ctr=$('pg-counter'),num=$('pg-num');
@@ -2056,7 +2944,7 @@ async function doLogin(){
   const em=$('li-em').value.trim(),pw=$('li-pw').value;
   if(!em||!pw){serr('li-err','يرجى ملء جميع الحقول');return;}
   const btn=$('li-btn');ld(btn,true);
-  try{await window.$fb.signInWithEmailAndPassword(window.$auth,em,pw);showOK('مرحباً بعودتك! 👋','تم تسجيل الدخول');}
+  try{await window.$fb.signInWithEmailAndPassword(window.$auth,em,pw);showOK('مرحبا بعودتك! ','تم تسجيل الدخول');}
   catch(e){serr('li-err',aerr(e.code));}finally{ld(btn,false,'دخول ←');}
 }
 async function doSignup(){
@@ -2070,7 +2958,7 @@ async function doSignup(){
     await updateProfile(cr.user,{displayName:nm});
     const isAdm=em===window.ADMIN;
     await setDoc(doc(window.$db,'users',cr.user.uid),{name:nm,email:em,uid:cr.user.uid,role:isAdm?'admin':'user',createdAt:serverTimestamp()});
-    showOK(`مرحباً يا ${nm}! 🎉`,'تم إنشاء حسابك 🎌');
+    showOK(`${'مرحباً'} ${nm}!`, 'تم إنشاء حسابك بنجاح');
   }catch(e){serr('su-err',aerr(e.code));}finally{ld(btn,false,'سجّل مجانًا ←');}
 }
 async function doGoogle(){
@@ -2079,12 +2967,23 @@ async function doGoogle(){
     const r=await signInWithPopup(window.$auth,window.$gp);
     const u=r.user,isAdm=u.email===window.ADMIN;
     await setDoc(doc(window.$db,'users',u.uid),{name:u.displayName,email:u.email,uid:u.uid,role:isAdm?'admin':'user',lastLogin:serverTimestamp()},{merge:true});
-    showOK(`مرحباً يا ${u.displayName||'مستخدم'}! 👋`,'تم الدخول بـ Google');
+    showOK(`مرحباً ${u.displayName||''}!`, 'تم الدخول بـ Google');
   }catch(e){if(e.code!=='auth/popup-closed-by-user')serr('li-err',aerr(e.code));}
 }
+
+async function doGithub(){
+  try{
+    const {signInWithPopup,doc,setDoc,serverTimestamp,ghp}=window.$fb;
+    const r=await signInWithPopup(window.$auth,ghp);
+    const u=r.user;
+    await setDoc(doc(window.$db,'users',u.uid),{name:u.displayName||u.email?.split('@')[0]||'GitHub User',email:u.email||'',uid:u.uid,photoURL:u.photoURL||'',role:'user',lastLogin:serverTimestamp()},{merge:true});
+    showOK(`مرحباً ${u.displayName||''}!`, 'تم الدخول بـ GitHub');
+  }catch(e){if(e.code!=='auth/popup-closed-by-user')serr('li-err',aerr(e.code));}
+}
+
 async function doOut(){
   await window.$fb.signOut(window.$auth);
-  window.MY_LIST={};persist();onLogout();toast('👋','تم تسجيل الخروج');
+  window.MY_LIST={};persist();onLogout();toast('!','تم تسجيل الخروج');
 }
 
 function onLogin(user){
@@ -2110,6 +3009,10 @@ function onLogin(user){
     const admBtn=$('mob-adm-btn');
     if(admBtn) admBtn.style.display='flex';
   }
+  // Load friend requests badge
+  setTimeout(loadFriendRequests, 500);
+  // Reload titles to apply NSFW filter for logged-in user
+  if(typeof loadTitles==='function') loadTitles();
 }
 function onLogout(){
   $('sb-g').style.display='flex';$('sb-u').style.display='none';
@@ -2119,11 +3022,29 @@ function onLogout(){
   $('mob-av').style.display='none';
   const admBtn=$('mob-adm-btn');if(admBtn)admBtn.style.display='none';
   window.ME=null;
+  // Reload titles to hide NSFW for logged-out users
+  if(typeof loadTitles==='function') loadTitles();
 }
 window.onLogin=onLogin; window.onLogout=onLogout;
 
 function aerr(code){
-  return({'auth/user-not-found':'البريد غير مسجل','auth/wrong-password':'كلمة المرور غلط','auth/invalid-credential':'البريد أو كلمة المرور غلط','auth/email-already-in-use':'البريد مستخدم','auth/weak-password':'كلمة المرور ضعيفة','auth/network-request-failed':'خطأ في الشبكة','auth/too-many-requests':'محاولات كثيرة، انتظر','auth/requires-recent-login':'يرجى تسجيل الدخول مجدداً'})[code]||'خطأ: '+code;
+  return({
+    'auth/user-not-found':'البريد غير مسجل',
+    'auth/wrong-password':'كلمة المرور غلط',
+    'auth/invalid-credential':'البريد أو كلمة المرور غلط',
+    'auth/email-already-in-use':'البريد مستخدم من قبل',
+    'auth/weak-password':'كلمة المرور ضعيفة جداً',
+    'auth/network-request-failed':'خطأ في الشبكة',
+    'auth/too-many-requests':'محاولات كثيرة، انتظر قليلاً',
+    'auth/requires-recent-login':'يرجى تسجيل الدخول مجدداً',
+    'auth/account-exists-with-different-credential':'الحساب مسجل بطريقة أخرى',
+    'auth/popup-blocked':'البراوزر حجب النافذة، اسمح بـ popups',
+    'auth/cancelled-popup-request':'تم إلغاء الطلب',
+    'auth/invalid-phone-number':'رقم الهاتف غير صحيح',
+    'auth/invalid-verification-code':'كود التحقق غير صحيح',
+    'auth/code-expired':'انتهت صلاحية الكود، أعد الإرسال',
+    'auth/missing-phone-number':'أدخل رقم الهاتف',
+  })[code]||'خطأ: '+code;
 }
 function serr(id,msg){const el=$(id);if(!el)return;el.textContent=msg;el.style.display='block';setTimeout(()=>el.style.display='none',4500);}
 function ld(btn,on,lbl=''){btn.disabled=on;btn.innerHTML=on?'<span class="spin"></span> جاري...':lbl;}
@@ -2133,18 +3054,318 @@ function openM(tab){$('auth-m').classList.add('open');sw(tab);$('m-ok').style.di
 function closeM(){$('auth-m').classList.remove('open');}
 function closeOut(e){if(e.target===$('auth-m'))closeM();}
 function sw(t){
-  $('mt-li').classList.toggle('on',t==='login');$('mt-su').classList.toggle('on',t==='signup');
-  $('mf-li').style.display=t==='login'?'block':'none';$('mf-su').style.display=t==='signup'?'block':'none';
-  $('m-ok').style.display='none';
+  ['mf-li','mf-su','m-ok'].forEach(id=>{const el=$(id);if(el)el.style.display='none';});
+  $('mt-li').classList.toggle('on',t==='login');
+  $('mt-su').classList.toggle('on',t==='signup');
+  if(t==='login')$('mf-li').style.display='block';
+  else if(t==='signup')$('mf-su').style.display='block';
 }
-function showOK(ti,ms){$('mf-li').style.display='none';$('mf-su').style.display='none';$('m-ok').style.display='block';$('ok-ti').textContent=ti;$('ok-ms').textContent=ms;setTimeout(closeM,2000);}
+function showOK(ti,ms){
+  ['mf-li','mf-su'].forEach(id=>{const el=$(id);if(el)el.style.display='none';});
+  $('m-ok').style.display='block';$('ok-ti').textContent=ti;$('ok-ms').textContent=ms;setTimeout(closeM,2200);
+}
 
 /* ═══ NAVIGATION ══════════════════════════════════════ */
+/* ═══ URL ROUTING ═════════════════════════════════════ */
+function initRouting(){
+  const path = location.pathname;
+  // /manga/ID
+  const manga = path.match(/^\/manga\/([^\/]+)/);
+  if(manga){
+    const id = decodeURIComponent(manga[1]);
+    window._authReady.then(async()=>{
+      if(!TITLES.length) await loadTitles();
+      showDet(id);
+    });
+    return;
+  }
+  // /user/UID
+  const user = path.match(/^\/user\/([^\/]+)/);
+  if(user){
+    const uid = decodeURIComponent(user[1]);
+    window._authReady.then(()=>showProfile(uid));
+    return;
+  }
+  // /admin
+  if(path==='/admin'){
+    window._authReady.then(()=>{if(window.IS_ADMIN)go('admin');});
+    return;
+  }
+}
+
+function pushRoute(path){
+  if(history.pushState) history.pushState(null,'',path);
+}
+
+// Override showDet to also push URL
+const _origShowDet = window.showDet;
+window.addEventListener('popstate',()=>{
+  const path=location.pathname;
+  const manga=path.match(/^\/manga\/([^\/]+)/);
+  if(manga) showDet(decodeURIComponent(manga[1]));
+  else go('home');
+});
+
+/* ═══ UPLOAD METHOD TABS ══════════════════════════════ */
+let CUR_UMT = 'img'; // current upload method
+function setUMT(m){
+  CUR_UMT=m;
+  ['img','pdf','zip','url','json'].forEach(t=>{
+    $(`umt-${t}`)?.classList.toggle('on',t===m);
+    $(`um-${t}`)&&($(`um-${t}`).style.display=t===m?'block':'none');
+  });
+}
+
+/* ─── PDF Upload ─── */
+let PDF_FILE=null;
+function dropPDF(e){e.preventDefault();dlv('pdf-zone');const f=e.dataTransfer.files[0];if(f)selPDF(f);}
+function selPDF(f){
+  if(!f||f.type!=='application/pdf'&&!f.name.endsWith('.pdf')){toast('✕','اختر ملف PDF');return;}
+  PDF_FILE=f;
+  const info=$('pdf-info');
+  info.style.display='block';
+  info.innerHTML=`📄 <strong>${f.name}</strong> · ${(f.size/1024/1024).toFixed(2)} MB<br><span style="color:var(--muted);font-size:11px">سيتم تحويل كل صفحة إلى صورة عند الرفع</span>`;
+  $('pdf-zone-inner').innerHTML=`<div style="font-size:22px">✓</div><div style="font-size:12px;color:var(--green)">${f.name}</div>`;
+}
+
+async function extractPDFPages(file){
+  // Load pdf.js from CDN
+  if(!window.pdfjsLib){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      s.onload=res;s.onerror=rej;document.head.appendChild(s);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  const ab=await file.arrayBuffer();
+  const pdf=await window.pdfjsLib.getDocument({data:ab}).promise;
+  const files=[];
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const vp=page.getViewport({scale:1.5});
+    const canvas=document.createElement('canvas');
+    canvas.width=vp.width;canvas.height=vp.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;
+    const blob=await new Promise(r=>canvas.toBlob(r,'image/jpeg',0.92));
+    files.push(new File([blob],`page_${String(i).padStart(3,'0')}.jpg`,{type:'image/jpeg'}));
+  }
+  return files;
+}
+
+/* ─── ZIP/CBZ Upload ─── */
+let ZIP_FILE=null;
+function dropZIP(e){e.preventDefault();dlv('zip-zone');const f=e.dataTransfer.files[0];if(f)selZIP(f);}
+function selZIP(f){
+  if(!f){toast('✕','اختر ملف ZIP أو CBZ');return;}
+  ZIP_FILE=f;
+  const info=$('zip-info');
+  info.style.display='block';
+  info.innerHTML=`🗜 <strong>${f.name}</strong> · ${(f.size/1024/1024).toFixed(2)} MB<br><span style="color:var(--muted);font-size:11px">سيتم استخراج الصور تلقائياً</span>`;
+  $('zip-zone-inner').innerHTML=`<div style="font-size:22px">✓</div><div style="font-size:12px;color:var(--green)">${f.name}</div>`;
+}
+
+async function extractZIPImages(file){
+  if(!window.JSZip){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      s.onload=res;s.onerror=rej;document.head.appendChild(s);
+    });
+  }
+  const zip=await window.JSZip.loadAsync(file);
+  const imgs=Object.keys(zip.files)
+    .filter(n=>/\.(jpe?g|png|webp|gif)$/i.test(n)&&!zip.files[n].dir)
+    .sort();
+  const files=[];
+  for(const name of imgs){
+    const blob=await zip.files[name].async('blob');
+    const ext=name.split('.').pop().toLowerCase();
+    files.push(new File([blob],name,{type:`image/${ext==='jpg'?'jpeg':ext}`}));
+  }
+  return files;
+}
+
+/* ─── JSON Parser ─── */
+let JSON_CHAPS=[];
+function parseJSONChaps(){
+  const raw=$('json-inp').value.trim();
+  if(!raw){toast('✕','الصق JSON أولاً');return;}
+  try{
+    const obj=JSON.parse(raw);
+    // Support kotatsu format: {chapters:{id:{number,name,url}}}
+    // Support arabtoons array or object
+    let chaps=[];
+    if(obj.chapters&&typeof obj.chapters==='object'){
+      chaps=Object.values(obj.chapters).map(c=>({number:c.number,name:c.name||`الفصل ${c.number}`,url:c.url||'',pages:[]}));
+    } else if(Array.isArray(obj)){
+      chaps=obj.map(c=>({number:c.number||c.num,name:c.name||`الفصل ${c.number||c.num}`,url:c.url||'',pages:[]}));
+    } else if(obj.url||obj.public_url){
+      // Single title JSON — extract chapters if present
+      chaps=obj.chapters?Object.values(obj.chapters).map(c=>({number:c.number,name:c.name,url:c.url||'',pages:[]})):[];
+    }
+    chaps.sort((a,b)=>a.number-b.number);
+    JSON_CHAPS=chaps;
+    const res=$('json-res');
+    if(!chaps.length){res.textContent='لم يتم العثور على فصول';res.style.color='var(--red)';return;}
+    res.textContent=`✓ ${chaps.length} فصل جاهز للرفع`;res.style.color='var(--green)';
+    const cl=$('json-clist');cl.style.display='block';
+    cl.innerHTML=chaps.map((c,i)=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--brd)">
+        <span style="font-size:11px;color:var(--muted);width:28px">${c.number}</span>
+        <span style="flex:1;font-size:12px">${c.name}</span>
+        ${c.url?`<span style="font-size:10px;color:var(--muted);direction:ltr;overflow:hidden;text-overflow:ellipsis;max-width:120px">${c.url}</span>`:''}
+      </div>`).join('');
+  }catch(e){$('json-res').textContent='JSON غير صحيح: '+e.message;$('json-res').style.color='var(--red)';}
+}
+
+/* ─── Updated saveChap ─── */
+async function saveChap(){
+  const tid=$('csel').value,num=parseFloat($('ch-n').value);
+  if(!tid||isNaN(num)){toast('✕','اختر عنواناً ورقم الفصل');return;}
+  const btn=$('schb');btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري الرفع...';
+  try{
+    let urls=[];
+    if(CUR_UMT==='img'){
+      if(!SPGS.length){toast('✕','اختر صور الصفحات');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      const tot=SPGS.length;
+      for(let i=0;i<tot;i++){
+        $('ppt').textContent=`صفحة ${i+1} من ${tot}`;
+        urls.push(await uploadC(SPGS[i],`ch${num}_p${i+1}_${Date.now()}`,'ppw','ppf','ppt'));
+      }
+    } else if(CUR_UMT==='pdf'){
+      if(!PDF_FILE){toast('✕','اختر ملف PDF');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      toast('⏳','جاري تحويل PDF...');
+      const pages=await extractPDFPages(PDF_FILE);
+      const tot=pages.length;
+      $('ppw').style.display='block';
+      for(let i=0;i<tot;i++){
+        $('ppt').textContent=`صفحة ${i+1} من ${tot}`;
+        urls.push(await uploadC(pages[i],`ch${num}_p${i+1}_${Date.now()}`,'ppw','ppf','ppt'));
+      }
+      PDF_FILE=null;
+    } else if(CUR_UMT==='zip'){
+      if(!ZIP_FILE){toast('✕','اختر ملف ZIP');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      toast('⏳','جاري استخراج ZIP...');
+      const pages=await extractZIPImages(ZIP_FILE);
+      if(!pages.length){toast('✕','لم يتم العثور على صور في الملف');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      const tot=pages.length;
+      $('ppw').style.display='block';
+      for(let i=0;i<tot;i++){
+        $('ppt').textContent=`صفحة ${i+1} من ${tot}`;
+        urls.push(await uploadC(pages[i],`ch${num}_p${i+1}_${Date.now()}`,'ppw','ppf','ppt'));
+      }
+      ZIP_FILE=null;
+    } else if(CUR_UMT==='url'){
+      const raw=$('url-inp').value.trim();
+      if(!raw){toast('✕','أدخل روابط الصور');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      urls=raw.split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'));
+      if(!urls.length){toast('✕','لم يتم العثور على روابط صحيحة');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+    } else if(CUR_UMT==='json'){
+      // Save each chapter from parsed JSON
+      if(!JSON_CHAPS.length){toast('✕','استخرج الفصول أولاً');btn.disabled=false;btn.innerHTML='رفع الفصل ↑';return;}
+      const {collection,addDoc,doc,updateDoc,serverTimestamp}=window.$fb;
+      const t=TITLES.find(x=>x.id===tid);
+      let added=0;
+      for(const ch of JSON_CHAPS){
+        await addDoc(collection(window.$db,`titles/${tid}/chapters`),{
+          number:ch.number,name:ch.name,pages:ch.pages,sourceUrl:ch.url||'',createdAt:serverTimestamp()
+        });
+        added++;
+      }
+      if(t){await updateDoc(doc(window.$db,'titles',tid),{chaptersCount:(t.chaptersCount||0)+added});t.chaptersCount=(t.chaptersCount||0)+added;}
+      toast('✓',`تم رفع ${added} فصل من JSON`);
+      $('ch-n').value='';JSON_CHAPS=[];$('json-inp').value='';$('json-clist').style.display='none';$('json-res').textContent='';
+      $('ppw').style.display='none';
+      await loadChaps(tid);
+      btn.disabled=false;btn.innerHTML='رفع الفصل ↑';
+      return;
+    }
+    const {collection,addDoc,doc,updateDoc,serverTimestamp}=window.$fb;
+    await addDoc(collection(window.$db,`titles/${tid}/chapters`),{
+      number:num,name:$('ch-nm2').value.trim()||`الفصل ${num}`,pages:urls,createdAt:serverTimestamp()
+    });
+    const t=TITLES.find(x=>x.id===tid);
+    if(t){await updateDoc(doc(window.$db,'titles',tid),{chaptersCount:(t.chaptersCount||0)+1});t.chaptersCount=(t.chaptersCount||0)+1;}
+    toast('✓',`تم رفع الفصل ${num}! (${urls.length} صفحة)`);
+    $('ch-n').value='';$('ch-nm2').value='';
+    if(CUR_UMT==='img')clearPages();
+    else if(CUR_UMT==='url')$('url-inp').value='';
+    $('ppw').style.display='none';
+    await loadChaps(tid);
+  }catch(e){toast('✕','خطأ: '+e.message);console.error(e);}
+  finally{btn.disabled=false;btn.innerHTML='رفع الفصل ↑';}
+}
+
+/* ═══ DOWNLOAD ════════════════════════════════════════ */
+async function dlChap(tid, idx){
+  const ch=(window._ch||[])[idx];
+  if(!ch||!ch.pages||!ch.pages.length){toast('✕','لا توجد صور للتحميل');return;}
+  // Load JSZip
+  if(!window.JSZip){
+    await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s);});
+  }
+  toast('⏳',`جاري تحميل الفصل ${ch.number}...`);
+  try{
+    const zip=new window.JSZip();
+    const folder=zip.folder(`الفصل_${ch.number}`);
+    for(let i=0;i<ch.pages.length;i++){
+      const res=await fetch(ch.pages[i]);
+      const blob=await res.blob();
+      const ext=blob.type.includes('png')?'png':'jpg';
+      folder.file(`${String(i+1).padStart(3,'0')}.${ext}`,blob);
+    }
+    const content=await zip.generateAsync({type:'blob'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(content);
+    a.download=`${_detId}_فصل_${ch.number}.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('✓','تم التحميل!');
+  }catch(e){toast('✕','خطأ في التحميل: '+e.message);}
+}
+
+async function dlAllChaps(){
+  const ch=window._ch||[];
+  if(!ch.length){toast('✕','لا توجد فصول');return;}
+  if(!window.JSZip){
+    await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s);});
+  }
+  const btn=$('dl-all-btn');btn.disabled=true;btn.innerHTML='<span class="spin"></span> جاري...';
+  try{
+    const t=TITLES.find(x=>x.id===_detId);
+    const zip=new window.JSZip();
+    for(const c of ch){
+      if(!c.pages||!c.pages.length)continue;
+      const folder=zip.folder(`الفصل_${c.number}`);
+      for(let i=0;i<c.pages.length;i++){
+        toast('⏳',`فصل ${c.number} — صفحة ${i+1}/${c.pages.length}`);
+        const res=await fetch(c.pages[i]);
+        const blob=await res.blob();
+        const ext=blob.type.includes('png')?'png':'jpg';
+        folder.file(`${String(i+1).padStart(3,'0')}.${ext}`,blob);
+      }
+    }
+    const content=await zip.generateAsync({type:'blob',compression:'DEFLATE'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(content);
+    a.download=`${t?.nameAr||_detId}_كامل.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('✓','تم تحميل كل الفصول!');
+  }catch(e){toast('✕','خطأ: '+e.message);}
+  finally{btn.disabled=false;btn.innerHTML='⬇ تحميل الكل ZIP';}
+}
+
 function go(pg){
   if(pg==='admin'&&!window.IS_ADMIN){go('home');return;}
+  const el=$('pg-'+pg); if(!el) return;
   document.querySelectorAll('.pg').forEach(p=>p.classList.remove('on'));
-  $('pg-'+pg).classList.add('on');PREV=CUR;CUR=pg;
+  el.classList.add('on');PREV=CUR;CUR=pg;
   window.scrollTo({top:0,behavior:'smooth'});
+  // Update URL
+  if(pg==='home') pushRoute('/');
+  else if(pg==='admin') pushRoute('/admin');
   if(pg==='search')rSearch();
   if(pg==='mylist')rMyList(MLT);
   // Update sidebar active
@@ -2164,6 +3385,398 @@ function toast(ico,msg){
   el.classList.add('show');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),2600);
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeM();cconf();}});
+
+/* ═══ COMMENTS ════════════════════════════════════════ */
+let _cmtTid=null, _cmtStar=0, _cmtUnsub=null;
+
+function dtab(btn,tab){
+  btn.closest('.tabs').querySelectorAll('.tb').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
+  const ch=$('dt-ch'),rel=$('dt-rel'),cmt=$('dt-comments');
+  if(ch){ch.style.display=tab==='ch'?'flex':'none';if(tab==='ch')ch.style.flexDirection='column';}
+  if(rel)rel.style.display=tab==='rel'?'grid':'none';
+  if(cmt)cmt.style.display=tab==='comments'?'block':'none';
+  if(tab==='comments') loadComments(_cmtTid);
+}
+
+function setCmtStar(n){
+  _cmtStar=n;
+  document.querySelectorAll('#cmt-stars span').forEach((s,i)=>{
+    s.textContent=i<n?'★':'☆';
+    s.classList.toggle('on',i<n);
+  });
+}
+
+async function loadComments(tid){
+  if(!tid) return;
+  const el=$('cmt-list'); if(!el) return;
+  el.innerHTML=`<div style="color:var(--muted);font-size:13px;text-align:center;padding:16px">${'جاري التحميل...'}</div>`;
+  const {collection,query,orderBy,getDocs}=window.$fb;
+  try{
+    const snap=await getDocs(query(collection(window.$db,`titles/${tid}/comments`),orderBy('createdAt','desc')));
+    const cmts=[]; snap.forEach(d=>cmts.push({...d.data(),id:d.id}));
+    const cnt=$('cmt-cnt'); if(cnt) cnt.textContent='('+cmts.length+')';
+    if(!cmts.length){el.innerHTML=`<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px">${'لا توجد تعليقات — كن أول من يعلّق!'}</div>`;return;}
+    el.innerHTML=cmts.map(c=>cmtHTML(c,tid)).join('');
+  }catch(e){el.innerHTML=`<div style="color:var(--muted);font-size:13px;text-align:center;padding:16px">${'جاري التحميل...'}</div>`;}
+}
+
+function cmtHTML(c,tid){
+  const me=window.ME;
+  const isMe=me&&me.uid===c.uid;
+  const isAdmin=window.IS_ADMIN;
+  const av=c.photoURL?`<img src="${c.photoURL}" onload="this.classList.add('loaded')">`:``;
+  const initials=(c.displayName||'؟')[0];
+  const stars=c.rating?'★'.repeat(c.rating)+'☆'.repeat(5-c.rating):'';
+  const liked=me&&(c.likes||[]).includes(me.uid);
+  const likeCnt=(c.likes||[]).length;
+  const ts=c.createdAt?.seconds?new Date(c.createdAt.seconds*1000).toLocaleDateString('ar-EG',{day:'numeric',month:'short',year:'numeric'}):'';
+  // Role badge
+  const roleBadge = c.role==='admin'
+    ? (c.isOwner
+        ? `<span class="cmt-owner-badge">👑 ${'المالك'}</span>`
+        : `<span class="cmt-admin-badge">🛡️ ${'مسؤول'}</span>`)
+    : '';
+  return `<div class="cmt-item" id="cmt-${c.id}">
+    <div class="cmt-av" onclick="showProfile('${c.uid}')">${av||initials}</div>
+    <div class="cmt-body">
+      <div class="cmt-meta">
+        <span class="cmt-author" onclick="showProfile('${c.uid}')">${c.displayName||'مجهول'}</span>${roleBadge}
+        ${stars?`<span class="cmt-stars">${stars}</span>`:''}
+        <span class="cmt-date">${ts}</span>
+      </div>
+      <div class="cmt-text">${escHTML(c.text)}</div>
+      <div class="cmt-actions">
+        <button class="cmt-like-btn ${liked?'liked':''}" onclick="likeCmt('${tid}','${c.id}','${(c.likes||[]).join(',')}')">
+          ♥ <span>${likeCnt||''}</span>
+        </button>
+        ${isMe||isAdmin?`<button class="cmt-del-btn" onclick="delCmt('${tid}','${c.id}')">${'حذف'}</button>`:''}
+      </div>
+    </div>
+  </div>`;
+}
+
+function escHTML(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+async function postComment(){
+  if(!window.ME){toast('!','سجّل دخول أولاً');return;}
+  const txt=$('cmt-txt').value.trim();
+  if(!txt){toast('!','اكتب تعليقاً');return;}
+  const {collection,addDoc,serverTimestamp}=window.$fb;
+  try{
+    await addDoc(collection(window.$db,`titles/${_cmtTid}/comments`),{
+      uid:window.ME.uid,
+      displayName:window.ME.displayName||window.ME.email.split('@')[0],
+      photoURL:window.ME.photoURL||null,
+      role:window.IS_ADMIN?'admin':'user',
+      isOwner:window.ME.email===window.ADMIN,
+      text:txt,
+      rating:_cmtStar||null,
+      likes:[],
+      createdAt:serverTimestamp()
+    });
+    $('cmt-txt').value='';setCmtStar(0);
+    toast('✓','نُشر تعليقك!');
+    loadComments(_cmtTid);
+  }catch(e){toast('!','خطأ: '+e.message);}
+}
+
+async function likeCmt(tid,cid,likesStr){
+  if(!window.ME){toast('!','سجّل دخول');return;}
+  const uid=window.ME.uid;
+  const likes=likesStr?likesStr.split(',').filter(Boolean):[];
+  const {doc,updateDoc}=window.$fb;
+  const newLikes=likes.includes(uid)?likes.filter(x=>x!==uid):[...likes,uid];
+  await updateDoc(doc(window.$db,`titles/${tid}/comments`,cid),{likes:newLikes});
+  loadComments(tid);
+}
+
+async function delCmt(tid,cid){
+  if(!confirm('حذف التعليق؟')) return;
+  const {doc,deleteDoc}=window.$fb;
+  await deleteDoc(doc(window.$db,`titles/${tid}/comments`,cid));
+  toast('✓','تم الحذف');loadComments(tid);
+}
+
+/* ═══ PROFILE ═════════════════════════════════════════ */
+let _profUid=null;
+
+async function showProfile(uid){
+  _profUid=uid;
+  pushRoute(`/user/${uid}`);
+  const isMe=window.ME&&window.ME.uid===uid;
+  const ew=$('prof-edit-wrap'); if(ew) ew.style.display=isMe?'block':'none';
+  const {doc,getDoc,collection,getDocs,query,where}=window.$fb;
+  try{
+    const ud=await getDoc(doc(window.$db,'users',uid));
+    const u=ud.exists()?ud.data():{};
+    // Avatar
+    const img=$('prof-av-img'),txt=$('prof-av-txt');
+    if(u.photoURL){img.src=u.photoURL;img.classList.add('loaded');txt.style.display='none';}
+    else{img.classList.remove('loaded');txt.style.display='';txt.textContent=(u.name||u.email||'؟')[0].toUpperCase();}
+    $('prof-name').textContent=u.name||u.email||'مستخدم';
+    // Role badge
+    const badgeEl=$('prof-role-badge');
+    if(badgeEl){
+      const isOwner = u.email === window.ADMIN;
+      const isAdm = u.role === 'admin';
+      if(isOwner){
+        badgeEl.style.display='block';
+        badgeEl.innerHTML=`<span style="display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,#e11d48,#be123c);color:#fff;font-size:11px;font-weight:800;padding:2px 10px;border-radius:20px;letter-spacing:.5px">👑 ${'المالك'}</span>`;
+      } else if(isAdm){
+        badgeEl.style.display='block';
+        badgeEl.innerHTML=`<span style="display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:11px;font-weight:800;padding:2px 10px;border-radius:20px;letter-spacing:.5px">🛡️ ${'أدمن'}</span>`;
+      } else {
+        badgeEl.style.display='none';
+        badgeEl.innerHTML='';
+      }
+    }
+    $('prof-joined').textContent=u.createdAt?.seconds?'انضم'+' '+new Date(u.createdAt.seconds*1000).toLocaleDateString('ar-EG',{month:'long',year:'numeric'}):'';
+    $('prof-bio').textContent=u.bio||'لا توجد نبذة';
+    // Counts
+    if($('prof-followers')) $('prof-followers').textContent=u.followersCount||0;
+    if($('prof-following')) $('prof-following').textContent=u.followingCount||0;
+    // Social
+    const soc=$('prof-social');
+    const links=[];
+    if(u.facebook) links.push(`<a class="soc-btn" href="${u.facebook}" target="_blank">فيسبوك</a>`);
+    if(u.telegram) links.push(`<a class="soc-btn" href="${u.telegram}" target="_blank">تيليجرام</a>`);
+    if(u.twitter)  links.push(`<a class="soc-btn" href="${u.twitter}"  target="_blank">تويتر</a>`);
+    if(u.discord)  links.push(`<span class="soc-btn">${u.discord}</span>`);
+    soc.innerHTML=links.length?`<div class="social-links">${links.join('')}</div>`:'<div style="color:var(--muted);font-size:13px;text-align:center;padding:8px">لا توجد روابط</div>';
+    // Pre-fill edit form
+    if(isMe){
+      $('edit-bio').value=u.bio||'';$('edit-fb').value=u.facebook||'';
+      $('edit-tg').value=u.telegram||'';$('edit-tw').value=u.twitter||'';
+      $('edit-dc').value=u.discord||'';
+    }
+    // Follow / Friend buttons for other users
+    const actions=$('prof-actions');
+    if(actions && !isMe && window.ME){
+      const myUid=window.ME.uid;
+      const fwSnap=await getDoc(doc(window.$db,`users/${myUid}/following`,uid));
+      const isFollowing=fwSnap.exists();
+      const frSnap=await getDocs(query(collection(window.$db,'friendRequests'),where('from','==',myUid),where('to','==',uid)));
+      const frSnap2=await getDocs(query(collection(window.$db,'friendRequests'),where('from','==',uid),where('to','==',myUid),where('status','==','accepted')));
+      const reqSent=!frSnap.empty;
+      const areFriends=!frSnap2.empty||(!frSnap.empty&&frSnap.docs[0].data().status==='accepted');
+      if($('prof-friends')) $('prof-friends').textContent=u.friendsCount||0;
+      actions.innerHTML=`
+        <button class="follow-btn ${isFollowing?'following':''}" onclick="followUser('${uid}')">
+          ${isFollowing?'✓ يتابع':'+ متابعة'}
+        </button>
+        <button class="follow-btn ${areFriends?'following':reqSent?'requested':''}" onclick="sendFriendReq('${uid}')">
+          ${areFriends?'اصدقاء':reqSent?'بانتظار الرد':'طلب صداقة'}
+        </button>`;
+    } else if(actions && isMe){
+      actions.innerHTML='';
+    } else if(actions){
+      actions.innerHTML=`<button class="follow-btn" onclick="openM('login')">+ متابعة</button>`;
+    }
+    // List stats
+    const lsnap=await getDocs(collection(window.$db,`users/${uid}/list`));
+    let watch=0,done=0,fav=0;const items=[];
+    lsnap.forEach(d=>{const x=d.data();items.push(x);if(x.status==='watching')watch++;if(x.status==='done')done++;if(x.status==='fav')fav++;});
+    $('prof-cnt-watch').textContent=watch;
+    $('prof-cnt-done').textContent=done;
+    $('prof-cnt-fav').textContent=fav;
+    const pl=$('prof-lists');
+    const cards=items.slice(0,9).map(x=>`<div class="prof-list-card" onclick="showDet('${x.titleId||''}')"><img src="${x.img||''}" alt="${x.title||''}" onerror="this.style.display='none'"></div>`).join('');
+    pl.innerHTML=cards?`<div class="prof-list-grid">${cards}</div>`:'<div style="color:var(--muted);font-size:13px;text-align:center;padding:8px">القوائم فارغة</div>';
+  }catch(e){console.error(e);}
+  go('profile');
+}
+
+function showMyProfile(){
+  if(window.ME) showProfile(window.ME.uid);
+  else openM('login');
+}
+
+async function saveProfile(){
+  if(!window.ME) return;
+  const {doc,updateDoc}=window.$fb;
+  try{
+    await updateDoc(doc(window.$db,'users',window.ME.uid),{
+      bio:$('edit-bio').value.trim(),
+      facebook:$('edit-fb').value.trim(),
+      telegram:$('edit-tg').value.trim(),
+      twitter:$('edit-tw').value.trim(),
+      discord:$('edit-dc').value.trim(),
+    });
+    toast('✓','تم الحفظ!');showProfile(window.ME.uid);
+  }catch(e){toast('!','خطأ: '+e.message);}
+}
+
+/* ═══ CHAPTER LOCK ════════════════════════════════════ */
+/* ═══ LIKES SYSTEM ════════════════════════════════════ */
+// likes stored in Firestore: titles/{id}.likesCount (number) + likedBy (array of uid or guestId)
+let _guestId = localStorage.getItem('guestId') || (() => {
+  const id = 'g_' + Math.random().toString(36).slice(2,10);
+  localStorage.setItem('guestId', id);
+  return id;
+})();
+
+function _likeKey(){ return window.ME ? window.ME.uid : _guestId; }
+
+async function loadLikes(titleId){
+  try {
+    const {doc, getDoc} = window.$fb;
+    const snap = await getDoc(doc(window.$db, 'titles', titleId));
+    if(!snap.exists()) return;
+    const data = snap.data();
+    const count = data.likesCount || 0;
+    const likedBy = data.likedBy || [];
+    const liked = likedBy.includes(_likeKey());
+    const btn = $('d-heart');
+    if(!btn) return;
+    btn.querySelector('#d-likes').textContent = count >= 1000 ? (count/1000).toFixed(1)+'K' : count;
+    btn.classList.toggle('liked', liked);
+  } catch(e){}
+}
+
+async function toggleLike(){
+  if(!_detId) return;
+  const btn = $('d-heart');
+  const wasLiked = btn.classList.contains('liked');
+  const countEl = $('d-likes');
+  const cur = parseNum(countEl.textContent);
+  const newCount = wasLiked ? Math.max(0, cur-1) : cur+1;
+  // Optimistic UI
+  countEl.textContent = newCount >= 1000 ? (newCount/1000).toFixed(1)+'K' : newCount;
+  btn.classList.toggle('liked', !wasLiked);
+  try {
+    const {doc, setDoc, arrayUnion, arrayRemove, increment} = window.$fb;
+    const ref = doc(window.$db, 'titles', _detId);
+    if(wasLiked){
+      await setDoc(ref, {likedBy: arrayRemove(_likeKey()), likesCount: increment(-1)}, {merge:true});
+    } else {
+      await setDoc(ref, {likedBy: arrayUnion(_likeKey()), likesCount: increment(1)}, {merge:true});
+      btn.classList.remove('liked');
+      void btn.offsetWidth;
+      btn.classList.add('liked');
+    }
+    const t = TITLES.find(x=>x.id===_detId);
+    if(t) t.likesCount = newCount;
+  } catch(e) {
+    countEl.textContent = cur >= 1000 ? (cur/1000).toFixed(1)+'K' : cur;
+    btn.classList.toggle('liked', wasLiked);
+    toast('✕', 'خطأ: '+e.message);
+    console.error('toggleLike error:',e);
+  }
+}
+
+function parseNum(s){
+  s = String(s).trim();
+  if(s.endsWith('K')) return Math.round(parseFloat(s)*1000);
+  return parseInt(s)||0;
+}
+
+function showLockMsg(){
+  // Show login prompt inline above chapters
+  const existing=$('lock-banner');
+  if(existing){existing.remove();return;}
+  const banner=document.createElement('div');
+  banner.id='lock-banner';
+  banner.className='lock-banner';
+  banner.innerHTML=`
+    <h4>${'هذا الفصل للمشتركين فقط'}</h4>
+    <p>${'سجّل دخول لقراءة باقي الفصول مجاناً'}</p>
+    <button class="ba2 bar sm" onclick="openM('login');this.closest('#lock-banner').remove()">${'تسجيل الدخول'}</button>
+    <button class="ba2 bag sm" onclick="openM('signup');this.closest('#lock-banner').remove()" style="margin-right:8px">${'حساب جديد'}</button>
+  `;
+  $('dt-ch').before(banner);
+  banner.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+/* ═══ FOLLOW SYSTEM ═══════════════════════════════════ */
+// Firestore paths:
+// users/{uid}/following/{targetUid}  → {createdAt}
+// users/{uid}/followers/{myUid}      → auto-written
+
+async function followUser(targetUid){
+  if(!window.ME){openM('login');return;}
+  const myUid=window.ME.uid;
+  if(myUid===targetUid) return;
+  const {doc,setDoc,deleteDoc,serverTimestamp,increment,updateDoc,getDoc}=window.$fb;
+  const fwRef=doc(window.$db,`users/${myUid}/following`,targetUid);
+  const frRef=doc(window.$db,`users/${targetUid}/followers`,myUid);
+  const isFollowing=(await getDoc(fwRef)).exists();
+  if(isFollowing){
+    await deleteDoc(fwRef); await deleteDoc(frRef);
+    // decrement counts
+    await updateDoc(doc(window.$db,'users',myUid),{followingCount:increment(-1)}).catch(()=>{});
+    await updateDoc(doc(window.$db,'users',targetUid),{followersCount:increment(-1)}).catch(()=>{});
+    toast('✓','تم إلغاء المتابعة');
+  } else {
+    await setDoc(fwRef,{createdAt:serverTimestamp()});
+    await setDoc(frRef,{createdAt:serverTimestamp()});
+    await updateDoc(doc(window.$db,'users',myUid),{followingCount:increment(1)}).catch(()=>{});
+    await updateDoc(doc(window.$db,'users',targetUid),{followersCount:increment(1)}).catch(()=>{});
+    toast('✓','تمت المتابعة');
+  }
+  showProfile(targetUid);
+}
+
+/* ═══ FRIEND REQUEST SYSTEM ═══════════════════════════ */
+// Firestore paths:
+// friendRequests/{reqId}  → {from, to, status:'pending'|'accepted', createdAt}
+
+async function sendFriendReq(targetUid){
+  if(!window.ME){openM('login');return;}
+  const myUid=window.ME.uid;
+  const {collection,addDoc,serverTimestamp,query,where,getDocs,doc,updateDoc,deleteDoc}=window.$fb;
+  // Check existing
+  const q=query(collection(window.$db,'friendRequests'),where('from','==',myUid),where('to','==',targetUid));
+  const snap=await getDocs(q);
+  if(!snap.empty){
+    // Cancel request
+    await deleteDoc(doc(window.$db,'friendRequests',snap.docs[0].id));
+    toast('✓','تم إلغاء طلب الصداقة');
+    showProfile(targetUid); return;
+  }
+  // Check reverse (they sent us one → accept it)
+  const q2=query(collection(window.$db,'friendRequests'),where('from','==',targetUid),where('to','==',myUid),where('status','==','pending'));
+  const snap2=await getDocs(q2);
+  if(!snap2.empty){
+    await updateDoc(doc(window.$db,'friendRequests',snap2.docs[0].id),{status:'accepted'});
+    toast('✓','قبلت طلب الصداقة!');
+    showProfile(targetUid); return;
+  }
+  await addDoc(collection(window.$db,'friendRequests'),{from:myUid,fromName:window.ME.displayName||window.ME.email.split('@')[0],to:targetUid,status:'pending',createdAt:serverTimestamp()});
+  toast('✓','تم إرسال طلب الصداقة');
+  showProfile(targetUid);
+}
+
+async function respondFriendReq(reqId,accept){
+  const {doc,updateDoc,deleteDoc}=window.$fb;
+  if(accept){
+    await updateDoc(doc(window.$db,'friendRequests',reqId),{status:'accepted'});
+    toast('✓','قبلت الطلب!');
+  } else {
+    await deleteDoc(doc(window.$db,'friendRequests',reqId));
+    toast('✓','تم الرفض');
+  }
+  loadFriendRequests();
+}
+
+async function loadFriendRequests(){
+  if(!window.ME) return;
+  const {collection,query,where,getDocs}=window.$fb;
+  const box=$('friend-reqs-box'),list=$('friend-reqs-list'),badge=$('freq-badge');
+  if(!box) return;
+  const snap=await getDocs(query(collection(window.$db,'friendRequests'),where('to','==',window.ME.uid),where('status','==','pending')));
+  const reqs=[]; snap.forEach(d=>reqs.push({...d.data(),id:d.id}));
+  box.style.display=reqs.length?'block':'none';
+  if(badge){badge.textContent=reqs.length;badge.style.display=reqs.length?'inline':'none';}
+  if(!list) return;
+  list.innerHTML=reqs.length?reqs.map(r=>`
+    <div class="friend-req-banner">
+      <b style="cursor:pointer;color:var(--red)" onclick="showProfile('${r.from}')">${r.fromName||'مستخدم'}</b> أرسل لك طلب صداقة
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="ba2 bar sm" onclick="respondFriendReq('${r.id}',true)">قبول</button>
+        <button class="ba2 bag sm" onclick="respondFriendReq('${r.id}',false)">رفض</button>
+      </div>
+    </div>`).join(''):'<div style="color:var(--muted);font-size:13px;text-align:center;padding:8px">لا توجد طلبات</div>';
+}
 </script>
 </body>
 </html>
